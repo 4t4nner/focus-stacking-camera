@@ -41,6 +41,21 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
+    <!-- Server status indicator -->
+    <TextView
+        android:id="@+id/serverStatusTV"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginBottom="16dp"
+        android:background="#AA000000"
+        android:padding="6dp"
+        android:textColor="#AAAAAA"
+        android:textSize="12sp"
+        android:fontFamily="monospace"
+        android:visibility="gone"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent" />
     <ImageView
         android:id="@+id/capturedIV"
         android:layout_width="0dp"
@@ -52,44 +67,71 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <TextView
-        android:id="@+id/focusInfoTV"
+    <ProgressBar
+        android:id="@+id/progressBar"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="16dp"
-        android:layout_marginTop="48dp"
-        android:background="#AA000000"
-        android:padding="12dp"
-        android:textColor="@android:color/white"
-        android:textSize="14sp"
-        android:fontFamily="monospace"
         android:visibility="gone"
+        android:indeterminateTint="@android:color/white"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
+    <TextView
+        android:id="@+id/progressTV"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:background="#AA000000"
+        android:padding="8dp"
+        android:textColor="@android:color/white"
+        android:textSize="14sp"
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/progressBar" />
+
+    <!-- Folder button - visible only before capture -->
+    <ImageButton
+        android:id="@+id/folderIB"
+        android:layout_width="60dp"
+        android:layout_height="60dp"
+        android:layout_marginBottom="32dp"
+        android:layout_marginStart="32dp"
+        android:background="@android:color/transparent"
+        android:scaleType="fitCenter"
+        android:padding="8dp"
+        android:src="@drawable/ic_folder"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:tint="@android:color/white" />
+    <!-- Settings button - top left -->
+    <ImageButton
+        android:id="@+id/settingsIB"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="48dp"
+        android:background="@android:color/transparent"
+        android:scaleType="fitCenter"
+        android:padding="8dp"
+        android:src="@drawable/ic_settings"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:tint="@android:color/white" />
     <ImageButton
         android:id="@+id/captureIB"
-        android:layout_width="70dp"
-        android:layout_height="70dp"
+        android:layout_width="140dp"
+        android:layout_height="140dp"
         android:layout_marginBottom="32dp"
         android:background="@android:color/transparent"
+        android:scaleType="fitCenter"
+        android:padding="0dp"
         android:src="@drawable/camera"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:tint="@android:color/white" />
-
-    <ImageButton
-        android:id="@+id/closeIB"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:layout_marginTop="48dp"
-        android:layout_marginEnd="16dp"
-        android:background="#AA000000"
-        android:src="@android:drawable/ic_menu_close_clear_cancel"
-        android:visibility="gone"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
         app:tint="@android:color/white" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

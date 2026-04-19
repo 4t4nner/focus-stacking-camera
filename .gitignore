@@ -41,3 +41,8 @@ input*.txt
 context*.md
 
 server/*.pt
+
+server/debug_output
+!server/debug_output/session_20260418_171537_708508
+
+server/__pycache__

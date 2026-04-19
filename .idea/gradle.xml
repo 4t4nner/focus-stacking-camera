@@ -9,12 +9,13 @@
         <option name="gradleJvm" value="#GRADLE_LOCAL_JAVA_HOME" />
         <option name="modules">
           <set>
-            <option value="/mnt/DATA/projects/AndroidStudioProjects/focus-stacking-camera" />
-            <option value="/mnt/DATA/projects/AndroidStudioProjects/focus-stacking-camera/app" />
+            <option value="$PROJECT_DIR$" />
+            <option value="$PROJECT_DIR$/app" />
           </set>
         </option>
         <option name="resolveExternalAnnotations" value="true" />
       </GradleProjectSettings>
     </option>
+    <option name="parallelModelFetch" value="true" />
   </component>
 </project>
