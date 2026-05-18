@@ -1,0 +1,31 @@
+
+
+flowchart TD
+    Start([Нажата кнопка спуска]) --> Freeze[Зафиксировать детекции<br/>List&lt;cx, cy, label&gt;]
+    Freeze --> Check{Объектов >= 1?}
+    Check -->|нет| Abort([Прервать])
+    Check -->|да| Parallel
+
+    Parallel[/Параллельная подготовка/] --> LockAE[Блокировка AE<br/>экспозиция]
+    Parallel --> LockAWB[Блокировка AWB<br/>баланс белого]
+    Parallel --> LockISO[Фиксация ISO]
+    Parallel --> UIPrep[Обновление UI:<br/>режим захвата,<br/>нумерация объектов]
+
+    LockAE --> Sync((●))
+    LockAWB --> Sync
+    LockISO --> Sync
+    UIPrep --> Sync
+
+    Sync --> Loop{Для каждого<br/>объекта i}
+    Loop --> AF[Автофокус на cx_i, cy_i]
+    AF --> Wait[Ожидание сходимости AF<br/>таймаут 1.5 с]
+    Wait --> Shot[Снимок → JPEG<br/>DET_ts_i_cxXcy.jpg]
+    Shot --> Progress[Обновить прогресс<br/>Снято i/N]
+    Progress --> Loop
+    Loop -->|все сняты| Result([Список CapturedPhoto])
+
+    style Parallel fill:#e1f5ff,stroke:#0288d1
+    style Sync fill:#0288d1,color:#fff
+    style Start fill:#c8e6c9
+    style Result fill:#c8e6c9
+    style Abort fill:#ffcdd2

@@ -95,6 +95,6 @@ while IFS= read -r line || [ -n "$line" ]; do
     echo "⚠️ Файл не найден: $rel_path" >&2
 done < "$INPUT_FILE"
 
-echo -e "\nКонтекст сохранён в: ./context.md"% 
+echo -e "\nКонтекст сохранён в: ./context.md\n" 
 
 
