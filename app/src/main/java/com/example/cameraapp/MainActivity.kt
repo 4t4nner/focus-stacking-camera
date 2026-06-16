@@ -66,6 +66,7 @@ class MainActivity : AppCompatActivity() {
     private var frameCount = 0
 
     // Object detection results (used for capture)
+    @Volatile
     private var detectedObjects: List<DetectedObject> = emptyList()
 
     private val outputDir: File by lazy {
