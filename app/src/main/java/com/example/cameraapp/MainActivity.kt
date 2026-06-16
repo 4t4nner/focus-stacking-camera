@@ -26,6 +26,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 import androidx.camera.core.Camera as CameraX
+import android.content.Context
 
 class MainActivity : AppCompatActivity() {
 
@@ -79,7 +80,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val filePickerLauncher = registerForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments()
+        object : ActivityResultContracts.OpenMultipleDocuments() {
+            override fun createIntent(context: Context, input: Array<String>): Intent {
+                val intent = super.createIntent(context, input)
+                // Стартовая папка Pictures/CameraApp
+                val initialUri = android.provider.DocumentsContract.buildDocumentUri(
+                    "com.android.externalstorage.documents",
+                    "primary:Pictures/CameraApp"
+                )
+                intent.putExtra(android.provider.DocumentsContract.EXTRA_INITIAL_URI, initialUri)
+                return intent
+            }
+        }
     ) { uris ->
         if (uris.isNotEmpty()) {
             processPickedFiles(uris)
@@ -119,6 +131,7 @@ class MainActivity : AppCompatActivity() {
         settingsIB.setOnClickListener {
             SettingsDialog(this) {
                 refreshRemoteStatus()
+                reinitDetectors()   // ← переинициализация при смене детектора
             }.show()
         }
 
@@ -141,34 +154,46 @@ class MainActivity : AppCompatActivity() {
 
     // ======================== ДЕТЕКТОРЫ ========================
 
-    private fun initDetectors() {
-        // Попробовать YOLO, если не удалось — ML Kit
-        processingExecutor.execute {
-            try {
-                val yolo = YoloDetector(this)
-                if (yolo.initialize()) {
-                    yoloDetector = yolo
-                    useYolo = true
-                    Log.d(TAG, "YOLO detector initialized")
-                    runOnUiThread {
-                        fpsTV.text = "YOLO ready"
-                    }
-                } else {
-                    Log.w(TAG, "YOLO init failed, using ML Kit")
-                    mlKitDetector = MlKitDetector()
-                    useYolo = false
-                    runOnUiThread {
-                        fpsTV.text = "ML Kit ready"
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "YOLO init error, falling back to ML Kit", e)
-                mlKitDetector = MlKitDetector()
-                useYolo = false
-            }
-        }
+    private fun reinitDetectors() {
+        // Освобождаем старые детекторы
+        mlKitDetector?.close()
+        mlKitDetector = null
+        yoloDetector = null
+        useYolo = false
+        detectedObjects = emptyList()
+
+        // Заново инициализируем по текущим настройкам
+        initDetectors()
     }
 
+    private fun initDetectors() {
+        processingExecutor.execute {
+            val detector = AppSettings.getDetector(this)
+
+            if (detector == AppSettings.DETECTOR_YOLO) {
+                try {
+                    val yolo = YoloDetector(this)
+                    if (yolo.initialize()) {
+                        yoloDetector = yolo
+                        useYolo = true
+                        Log.d(TAG, "YOLO detector initialized")
+                        runOnUiThread { fpsTV.text = "YOLO ready" }
+                        return@execute
+                    } else {
+                        Log.w(TAG, "YOLO init failed, falling back to ML Kit")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "YOLO init error, falling back to ML Kit", e)
+                }
+            }
+
+            // ML Kit (по умолчанию или fallback)
+            mlKitDetector = MlKitDetector()
+            useYolo = false
+            Log.d(TAG, "Using ML Kit detector")
+            runOnUiThread { fpsTV.text = "ML Kit ready" }
+        }
+    }
     // ======================== CAMERA SETUP с ДЕТЕКЦИЕЙ ========================
 
     private fun startCamera() {
@@ -712,16 +737,32 @@ class MainActivity : AppCompatActivity() {
 
             try {
                 // Фокусировка на объекте
-                val meteringPoint = previewView.meteringPointFactory
-                    .createPoint(obj.cx, obj.cy)
-                val focusAction = FocusMeteringAction.Builder(meteringPoint)
-                    .setAutoCancelDuration(3, java.util.concurrent.TimeUnit.SECONDS)
-                    .build()
+                val focusLatch = java.util.concurrent.CountDownLatch(1)
 
-                camera?.cameraControl?.startFocusAndMetering(focusAction)
+                runOnUiThread {
+                    try {
+                        val meteringPoint = previewView.meteringPointFactory
+                            .createPoint(obj.cx, obj.cy)
+                        val focusAction = FocusMeteringAction.Builder(meteringPoint)
+                            .setAutoCancelDuration(3, java.util.concurrent.TimeUnit.SECONDS)
+                            .build()
 
-                // Ждём фокусировку
-                Thread.sleep(800)
+                        val future = camera?.cameraControl?.startFocusAndMetering(focusAction)
+                        if (future != null) {
+                            future.addListener({
+                                // Фокусировка завершена (успешно или нет)
+                                focusLatch.countDown()
+                            }, cameraExecutor)
+                        } else {
+                            focusLatch.countDown()
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Focus metering error", e)
+                        focusLatch.countDown()
+                    }
+                }
+                // Ждём завершения фокусировки, но не дольше 2 секунд
+                focusLatch.await(2, java.util.concurrent.TimeUnit.SECONDS)
 
                 // Захват
                 val filename = "DET_${timestamp}_${i + 1}_${obj.cx.toInt()}x${obj.cy.toInt()}.jpg"
@@ -738,6 +779,12 @@ class MainActivity : AppCompatActivity() {
                             capturedPaths.add(file.absolutePath)
                             focusPoints.add(Pair(obj.cx, obj.cy))
                             Log.d(TAG, "Captured: $filename")
+
+                            // Обновляем медиатеку ← NEW
+                            val intent = Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE)
+                            intent.data = Uri.fromFile(file)
+                            sendBroadcast(intent)
+
                             latch.countDown()
                         }
 
@@ -760,7 +807,24 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (capturedPaths.size >= 2) {
-            processImageStack(capturedPaths, focusPoints)
+            // Проверяем режим "только съёмка" ← NEW
+            if (AppSettings.isCaptureOnly(this)) {
+                runOnUiThread {
+                    hideProgress()
+                    captureIB.visibility = View.VISIBLE
+                    folderIB.visibility = View.VISIBLE
+                    overlayView.visibility = View.VISIBLE
+                    isCapturing = false
+                    Toast.makeText(
+                        this,
+                        "Saved ${capturedPaths.size} frames to ${outputDir.name}. " +
+                                "Process later via folder button.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } else {
+                processImageStack(capturedPaths, focusPoints)
+            }
         } else {
             runOnUiThread {
                 hideProgress()

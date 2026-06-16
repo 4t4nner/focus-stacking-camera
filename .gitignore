@@ -1,4 +1,9 @@
-tmp.txt
+theory/
+context.*
+*.excalidraw
+tmp.*
+tmp[0-9].*
+
 *.iml
 .gradle
 

@@ -1,5 +1,6 @@
 package com.example.cameraapp
 
+import android.util.Log
 import android.content.Context
 import android.graphics.*
 import org.opencv.android.OpenCVLoader
@@ -100,6 +101,7 @@ class YoloDetector(private val context: Context) {
 
         net.setInput(blob)
         val output = net.forward()
+        Log.d("YoloDetector", "output shape: ${output.size(0)} x ${output.size(1)} x ${output.size(2)}")
 
         val detections = parseOutput(output, imgW, imgH, scale, padLeft, padTop)
 
@@ -118,62 +120,41 @@ class YoloDetector(private val context: Context) {
         padLeft: Int,
         padTop: Int
     ): List<Detection> {
-        // YOLOv8 output: [1, 84, N]
-        // 84 = 4 (cx, cy, w, h) + 80 classes
-        val numClasses = 80
-        val rows = output.size(1).toInt()
-        val cols = output.size(2).toInt()
+        // YOLOv10 output: [1, 300, 6] -> [x1, y1, x2, y2, score, classId]
+        // Координаты уже в пространстве inputSize (640x640), NMS не нужен.
 
-        val data = FloatArray(rows * cols)
+        val numDet = output.size(1).toInt()   // 300
+        val step = output.size(2).toInt()     // 6
+
+        val data = FloatArray(numDet * step)
         output.reshape(1, 1)[0, 0, data]
 
-        val boxes = mutableListOf<RectF>()
-        val confidences = mutableListOf<Float>()
-        val classIds = mutableListOf<Int>()
+        val result = mutableListOf<Detection>()
 
-        for (i in 0 until cols) {
-            val cx = data[0 * cols + i]
-            val cy = data[1 * cols + i]
-            val w  = data[2 * cols + i]
-            val h  = data[3 * cols + i]
+        for (i in 0 until numDet) {
+            val base = i * step
+            val score = data[base + 4]
+            if (score < confThreshold) continue
 
-            var maxConf = 0f
-            var maxIdx = 0
-            for (c in 0 until numClasses) {
-                val conf = data[(4 + c) * cols + i]
-                if (conf > maxConf) {
-                    maxConf = conf
-                    maxIdx = c
-                }
-            }
+            val classId = data[base + 5].toInt()
 
-            if (maxConf < confThreshold) continue
+            // координаты в пространстве 640x640 -> в оригинал
+            val x1 = ((data[base + 0] - padLeft) / scale).coerceIn(0f, origW.toFloat())
+            val y1 = ((data[base + 1] - padTop) / scale).coerceIn(0f, origH.toFloat())
+            val x2 = ((data[base + 2] - padLeft) / scale).coerceIn(0f, origW.toFloat())
+            val y2 = ((data[base + 3] - padTop) / scale).coerceIn(0f, origH.toFloat())
 
-            val x1 = ((cx - w / 2f) - padLeft) / scale
-            val y1 = ((cy - h / 2f) - padTop) / scale
-            val x2 = ((cx + w / 2f) - padLeft) / scale
-            val y2 = ((cy + h / 2f) - padTop) / scale
-
-            boxes.add(RectF(
-                max(0f, x1), max(0f, y1),
-                min(origW.toFloat(), x2), min(origH.toFloat(), y2)
-            ))
-            confidences.add(maxConf)
-            classIds.add(maxIdx)
-        }
-
-        val indices = nms(boxes, confidences, nmsThreshold)
-
-        return indices.map { idx ->
-            val b = boxes[idx]
-            Detection(
-                classId = classIds[idx],
-                className = if (classIds[idx] < cocoNames.size) cocoNames[classIds[idx]] else "class${classIds[idx]}",
-                confidence = confidences[idx],
-                x1 = b.left, y1 = b.top,
-                x2 = b.right, y2 = b.bottom
+            result.add(
+                Detection(
+                    classId = classId,
+                    className = if (classId in cocoNames.indices) cocoNames[classId] else "class$classId",
+                    confidence = score,
+                    x1 = x1, y1 = y1, x2 = x2, y2 = y2
+                )
             )
         }
+
+        return result
     }
 
     private fun nms(boxes: List<RectF>, scores: List<Float>, threshold: Float): List<Int> {

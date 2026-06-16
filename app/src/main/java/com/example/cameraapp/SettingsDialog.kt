@@ -6,15 +6,10 @@ import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
 import android.view.LayoutInflater
-import android.view.View
 import android.widget.*
 import com.google.android.material.textfield.TextInputEditText
 import kotlin.concurrent.thread
 
-/**
- * Dialog for editing remote server settings.
- * Settings are persisted in SharedPreferences via AppSettings.
- */
 class SettingsDialog(
     private val context: Context,
     private val onSaved: () -> Unit
@@ -26,19 +21,31 @@ class SettingsDialog(
         val view = LayoutInflater.from(context)
             .inflate(R.layout.dialog_settings, null)
 
+        val captureOnlySwitch = view.findViewById<Switch>(R.id.captureOnlySwitch)
+        captureOnlySwitch.isChecked = AppSettings.isCaptureOnly(context)
+
+        val detectorRadioGroup = view.findViewById<RadioGroup>(R.id.detectorRadioGroup)
+        val detectorMlKitRB = view.findViewById<RadioButton>(R.id.detectorMlKitRB)
+        val detectorYoloRB = view.findViewById<RadioButton>(R.id.detectorYoloRB)
+
         val remoteSwitch = view.findViewById<Switch>(R.id.remoteEnabledSwitch)
         val hostET = view.findViewById<TextInputEditText>(R.id.serverHostET)
         val portET = view.findViewById<TextInputEditText>(R.id.serverPortET)
-        val statusDot = view.findViewById<View>(R.id.statusDot)
+        val statusDot = view.findViewById<android.view.View>(R.id.statusDot)
         val statusTV = view.findViewById<TextView>(R.id.statusTV)
         val testBtn = view.findViewById<Button>(R.id.testConnectionBtn)
+
+        // Load detector value ← NEW
+        when (AppSettings.getDetector(context)) {
+            AppSettings.DETECTOR_YOLO -> detectorYoloRB.isChecked = true
+            else -> detectorMlKitRB.isChecked = true
+        }
 
         // Load current values
         remoteSwitch.isChecked = AppSettings.isRemoteEnabled(context)
         hostET.setText(AppSettings.getRemoteHost(context))
         portET.setText(AppSettings.getRemotePort(context).toString())
 
-        // Enable/disable fields based on switch
         fun updateFieldsEnabled() {
             val enabled = remoteSwitch.isChecked
             hostET.isEnabled = enabled
@@ -53,7 +60,6 @@ class SettingsDialog(
             updateFieldsEnabled()
         }
 
-        // Test connection
         testBtn.setOnClickListener {
             val host = hostET.text.toString().trim()
             val port = portET.text.toString().toIntOrNull() ?: 5000
@@ -87,10 +93,16 @@ class SettingsDialog(
             }
         }
 
-        // Build dialog
         AlertDialog.Builder(context)
             .setView(view)
             .setPositiveButton("Save") { _, _ ->
+                AppSettings.setCaptureOnly(context, captureOnlySwitch.isChecked)
+
+                // Save detector
+                val detector = if (detectorYoloRB.isChecked)
+                    AppSettings.DETECTOR_YOLO else AppSettings.DETECTOR_MLKIT
+                AppSettings.setDetector(context, detector)
+
                 val host = hostET.text.toString().trim()
                 val port = portET.text.toString().toIntOrNull() ?: 5000
                 val enabled = remoteSwitch.isChecked

@@ -13,9 +13,23 @@ object AppSettings {
     private const val KEY_REMOTE_SERVER = "remote_server"
     private const val KEY_REMOTE_PORT = "remote_port"
     private const val KEY_REMOTE_ENABLED = "remote_enabled"
+    private const val KEY_DETECTOR = "detector_type"  // ← NEW
+    private const val KEY_CAPTURE_ONLY = "capture_only"
+
+    // Значения детектора
+    const val DETECTOR_MLKIT = "mlkit"
+    const val DETECTOR_YOLO = "yolo"
 
     private fun prefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
+
+    fun isCaptureOnly(context: Context): Boolean {
+        return prefs(context).getBoolean(KEY_CAPTURE_ONLY, false)
+    }
+
+    fun setCaptureOnly(context: Context, value: Boolean) {
+        prefs(context).edit().putBoolean(KEY_CAPTURE_ONLY, value).apply()
     }
 
     fun getRemoteHost(context: Context): String {
@@ -30,6 +44,16 @@ object AppSettings {
         return prefs(context).getBoolean(KEY_REMOTE_ENABLED, false)
     }
 
+    // получить выбранный детектор (по умолчанию MLKit)
+    fun getDetector(context: Context): String {
+        return prefs(context).getString(KEY_DETECTOR, DETECTOR_MLKIT) ?: DETECTOR_MLKIT
+    }
+
+    //
+    fun setDetector(context: Context, detector: String) {
+        prefs(context).edit().putString(KEY_DETECTOR, detector).apply()
+    }
+
     fun save(context: Context, host: String, port: Int, enabled: Boolean) {
         prefs(context).edit()
             .putString(KEY_REMOTE_SERVER, host.trim())
@@ -38,9 +62,6 @@ object AppSettings {
             .apply()
     }
 
-    /**
-     * Build RemoteConfig from saved settings.
-     */
     fun getRemoteConfig(context: Context): RemoteProcessor.RemoteConfig {
         val host = getRemoteHost(context)
         val port = getRemotePort(context)
