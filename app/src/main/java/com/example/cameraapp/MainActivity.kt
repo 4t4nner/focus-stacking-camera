@@ -27,6 +27,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 import androidx.camera.core.Camera as CameraX
 import android.content.Context
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.CaptureRequestOptions
+import androidx.exifinterface.media.ExifInterface
 
 class MainActivity : AppCompatActivity() {
 
@@ -50,12 +59,23 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var processingExecutor: ExecutorService
 
+    // Пул для записи JPEG на диск (параллельно захвату следующих кадров)
+    private val saverExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newFixedThreadPool(2)
+
+    // Чтобы дождаться, что ВСЕ файлы дописались, прежде чем завершить серию
+    private val pendingSaves = java.util.concurrent.atomic.AtomicInteger(0)
+    private val allSavesDone = java.util.concurrent.CountDownLatch(0) // пересоздаётся на старте серии
+
     private var remoteConfig: RemoteProcessor.RemoteConfig? = null
     private var isServerAvailable = false
 
     private var camera: CameraX? = null
     private var imageCapture: ImageCapture? = null
     private var isCapturing = false
+    // Последнее измеренное фокусное расстояние (диоптрии, 1/м)
+    @Volatile
+    private var lastFocusDistance: Float? = null
 
     // ===== ДЕТЕКЦИЯ =====
     private var yoloDetector: YoloDetector? = null
@@ -196,6 +216,7 @@ class MainActivity : AppCompatActivity() {
     }
     // ======================== CAMERA SETUP с ДЕТЕКЦИЕЙ ========================
 
+    @OptIn(ExperimentalCamera2Interop::class)
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
@@ -206,10 +227,25 @@ class MainActivity : AppCompatActivity() {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
 
-            // 2. ImageCapture
-            imageCapture = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                .build()
+            // 2. ImageCapture + чтение LENS_FOCUS_DISTANCE из метаданных кадра
+            val captureBuilder = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY) // CAPTURE_MODE_MAXIMIZE_QUALITY
+                .setFlashMode(ImageCapture.FLASH_MODE_OFF)
+
+            Camera2Interop.Extender(captureBuilder).setSessionCaptureCallback(
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult
+                    ) {
+                        result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let {
+                            lastFocusDistance = it
+                        }
+                    }
+                }
+            )
+            imageCapture = captureBuilder.build()
 
             // 3. ImageAnalysis — ДЕТЕКЦИЯ В РЕАЛЬНОМ ВРЕМЕНИ
             val imageAnalysis = ImageAnalysis.Builder()
@@ -575,20 +611,20 @@ class MainActivity : AppCompatActivity() {
 
             // Step 1: Generate detail masks
             val maskPaths = mutableListOf<String>()
-            for ((i, imgPath) in imagePaths.withIndex()) {
-                runOnUiThread { updateProgress("Detail mask ${i + 1}/${imagePaths.size}...") }
-                val maskPath = File(tempDir, "mask_$i.png").absolutePath
-                val success = DetailsMaskGenerator.generateMask(imgPath, maskPath)
-                if (success) {
-                    maskPaths.add(maskPath)
-                } else {
-                    maskPaths.add("")
+            PipelineLogger.measureStage("generate_masks") {
+                for ((i, imgPath) in imagePaths.withIndex()) {
+                    runOnUiThread { updateProgress("Detail mask ${i + 1}/${imagePaths.size}...") }
+                    val maskPath = File(tempDir, "mask_$i.png").absolutePath
+                    val success = DetailsMaskGenerator.generateMask(imgPath, maskPath)
+                    if (success) maskPaths.add(maskPath) else maskPaths.add("")
                 }
             }
 
             // Step 2: Filter duplicates
             runOnUiThread { updateProgress("Filtering duplicate masks...") }
-            val uniqueIndices = filterDuplicateMasks(maskPaths)
+            val uniqueIndices = PipelineLogger.measureStage("filter_duplicates") {
+                filterDuplicateMasks(maskPaths)
+            }
 
             if (uniqueIndices.size < 2) {
                 tempDir.deleteRecursively()
@@ -609,8 +645,9 @@ class MainActivity : AppCompatActivity() {
 
             // Step 3: Align images
             runOnUiThread { updateProgress("Aligning ${uImagePaths.size} images...") }
-            val alignedImages = ImageAligner.alignImages(uImagePaths)
-
+            val alignedImages = PipelineLogger.measureStage("align_images") {
+                ImageAligner.alignImages(uImagePaths)
+            }
             if (alignedImages.size < 2) {
                 tempDir.deleteRecursively()
                 return BitmapFactory.decodeFile(imagePaths[0])
@@ -622,19 +659,21 @@ class MainActivity : AppCompatActivity() {
             val refH = alignedImages[0].bitmap.height
 
             val alignedMasks = mutableListOf<Bitmap>()
-            for ((i, aligned) in alignedImages.withIndex()) {
-                if (i < uMaskPaths.size && uMaskPaths[i].isNotEmpty()) {
-                    val warpedMask = ImageAligner.warpMask(uMaskPaths[i], aligned.homography, refW, refH)
-                    alignedMasks.add(warpedMask ?: Bitmap.createBitmap(refW, refH, Bitmap.Config.ARGB_8888))
-                } else {
-                    alignedMasks.add(Bitmap.createBitmap(refW, refH, Bitmap.Config.ARGB_8888))
+            PipelineLogger.measureStage("warp_masks") {
+                for ((i, aligned) in alignedImages.withIndex()) {
+                    if (i < uMaskPaths.size && uMaskPaths[i].isNotEmpty()) {
+                        val warpedMask = ImageAligner.warpMask(uMaskPaths[i], aligned.homography, refW, refH)
+                        alignedMasks.add(warpedMask ?: Bitmap.createBitmap(refW, refH, Bitmap.Config.ARGB_8888))
+                    } else {
+                        alignedMasks.add(Bitmap.createBitmap(refW, refH, Bitmap.Config.ARGB_8888))
+                    }
                 }
             }
-
             // Step 5: Focus map
             runOnUiThread { updateProgress("Building focus map...") }
-            val focusMap = FocusMapBuilder.buildFocusMap(alignedMasks, uFocusPoints)
-
+            val focusMap = PipelineLogger.measureStage("build_focus_map") {
+                FocusMapBuilder.buildFocusMap(alignedMasks, uFocusPoints)
+            }
             if (focusMap == null) {
                 ImageAligner.releaseAlignedImages(alignedImages)
                 tempDir.deleteRecursively()
@@ -644,8 +683,9 @@ class MainActivity : AppCompatActivity() {
             // Step 6: Composite
             runOnUiThread { updateProgress("Compositing...") }
             val alignedBitmaps = alignedImages.map { it.bitmap }
-            val compositeResult = FocusStackCompositor.compose(alignedBitmaps, focusMap)
-
+            val compositeResult = PipelineLogger.measureStage("composite") {
+                FocusStackCompositor.compose(alignedBitmaps, focusMap)
+            }
             focusMap.release()
             ImageAligner.releaseAlignedImages(alignedImages)
             alignedMasks.forEach { it.recycle() }
@@ -725,10 +765,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
     private fun captureSequence(objects: List<DetectedObject>) {
-        val capturedPaths = mutableListOf<String>()
-        val focusPoints = mutableListOf<Pair<Float, Float>>()
+        val n = objects.size
+        // Индексированные слоты — порядок сохраняется, synchronized не нужен
+        val pathSlots = arrayOfNulls<String>(n)
+        val focusSlots = arrayOfNulls<Pair<Float, Float>>(n)
+        val savesRemaining = java.util.concurrent.atomic.AtomicInteger(0)
+
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+
+        PipelineLogger.startSession()
 
         for ((i, obj) in objects.withIndex()) {
             runOnUiThread {
@@ -736,7 +783,8 @@ class MainActivity : AppCompatActivity() {
             }
 
             try {
-                // Фокусировка на объекте
+                // ===== Фокусировка =====
+                val focusStart = System.currentTimeMillis()
                 val focusLatch = java.util.concurrent.CountDownLatch(1)
 
                 runOnUiThread {
@@ -749,10 +797,7 @@ class MainActivity : AppCompatActivity() {
 
                         val future = camera?.cameraControl?.startFocusAndMetering(focusAction)
                         if (future != null) {
-                            future.addListener({
-                                // Фокусировка завершена (успешно или нет)
-                                focusLatch.countDown()
-                            }, cameraExecutor)
+                            future.addListener({ focusLatch.countDown() }, cameraExecutor)
                         } else {
                             focusLatch.countDown()
                         }
@@ -761,53 +806,135 @@ class MainActivity : AppCompatActivity() {
                         focusLatch.countDown()
                     }
                 }
-                // Ждём завершения фокусировки, но не дольше 2 секунд
                 focusLatch.await(2, java.util.concurrent.TimeUnit.SECONDS)
+                val focusDurationMs = System.currentTimeMillis() - focusStart
 
-                // Захват
+                // ===== Фиксируем AE/AWB, чтобы takePicture не гонял precapture заново =====
+                val cam2Control = camera?.cameraControl?.let { Camera2CameraControl.from(it) }
+                cam2Control?.setCaptureRequestOptions(
+                    CaptureRequestOptions.Builder()
+                        .setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
+                        .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, true)
+                        .build()
+                )
+
+                // ===== Захват (камера освобождается, как только кадр в памяти) =====
                 val filename = "DET_${timestamp}_${i + 1}_${obj.cx.toInt()}x${obj.cy.toInt()}.jpg"
                 val file = File(outputDir, filename)
-                val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
 
-                val latch = java.util.concurrent.CountDownLatch(1)
+                val captureStart = SystemClock.elapsedRealtime()
+                val captureLatch = java.util.concurrent.CountDownLatch(1)
+
+                savesRemaining.incrementAndGet()
 
                 imageCapture?.takePicture(
-                    outputOptions,
                     cameraExecutor,
-                    object : ImageCapture.OnImageSavedCallback {
-                        override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                            capturedPaths.add(file.absolutePath)
-                            focusPoints.add(Pair(obj.cx, obj.cy))
-                            Log.d(TAG, "Captured: $filename")
+                    object : ImageCapture.OnImageCapturedCallback() {
+                        override fun onCaptureSuccess(image: ImageProxy) {
+                            // ВРЕМЯ: сенсор + JPEG-энкод, без диска
+                            val capturedAt = SystemClock.elapsedRealtime()
+                            val sensorEncodeMs = capturedAt - captureStart
 
-                            // Обновляем медиатеку ← NEW
-                            val intent = Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE)
-                            intent.data = Uri.fromFile(file)
-                            sendBroadcast(intent)
+                            // Копируем байты и сразу отпускаем буфер + камеру
+                            val rotation = image.imageInfo.rotationDegrees
+                            val bytes = image.toJpegBytes()
+                            image.close()
+                            captureLatch.countDown()
 
-                            latch.countDown()
+                            // Запись на диск — параллельно следующему захвату
+                            saverExecutor.execute {
+                                val saveStart = SystemClock.elapsedRealtime()
+                                try {
+                                    file.outputStream().use { it.write(bytes) }
+                                    applyExifRotation(file, rotation)
+
+                                    pathSlots[i] = file.absolutePath
+                                    focusSlots[i] = Pair(obj.cx, obj.cy)
+
+                                    val intent = Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE)
+                                    intent.data = Uri.fromFile(file)
+                                    sendBroadcast(intent)
+
+                                    val saveEnd = SystemClock.elapsedRealtime()
+                                    PipelineLogger.stage(i + 1, "sensor_encode", sensorEncodeMs)
+                                    PipelineLogger.stage(i + 1, "disk_write", saveEnd - saveStart)
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Save failed for $filename", e)
+                                } finally {
+                                    savesRemaining.decrementAndGet()
+                                }
+                            }
                         }
 
                         override fun onError(e: ImageCaptureException) {
                             Log.e(TAG, "Capture failed for $filename", e)
-                            latch.countDown()
+                            savesRemaining.decrementAndGet()
+                            captureLatch.countDown()
                         }
                     }
                 )
 
-                latch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                // Ждём только ЗАХВАТ, не запись на диск
+                captureLatch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                val captureEnd = SystemClock.elapsedRealtime()
+                val captureDurationMs = captureEnd - captureStart
+
+                // ===== Снимаем блокировку перед следующим кадром (другая сцена/дистанция) =====
+                cam2Control?.setCaptureRequestOptions(
+                    CaptureRequestOptions.Builder()
+                        .setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, false)
+                        .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, false)
+                        .build()
+                )
+
+                PipelineLogger.stage(i + 1, "focus_settle", focusDurationMs)
+
+                // ===== Лог кадра =====
+                val diopters = lastFocusDistance
+                val meters = diopters?.let { if (it > 0f) 1f / it else null }
+                PipelineLogger.logFrame(
+                    PipelineLogger.FrameLog(
+                        index = i + 1,
+                        label = obj.label,
+                        focusDistanceDiopters = diopters,
+                        focusDistanceMeters = meters,
+                        focusDurationMs = focusDurationMs,
+                        captureDurationMs = captureDurationMs
+                    )
+                )
 
             } catch (e: Exception) {
                 Log.e(TAG, "Error capturing frame $i", e)
             }
         }
 
+        // ===== Дожидаемся, что ВСЕ файлы дописались на диск =====
+        val waitStart = SystemClock.elapsedRealtime()
+        while (savesRemaining.get() > 0) {
+            Thread.sleep(10)
+            if (SystemClock.elapsedRealtime() - waitStart > 15_000) {
+                Log.w(TAG, "Timeout waiting for disk saves, remaining=${savesRemaining.get()}")
+                break
+            }
+        }
+
+        // Собираем результаты в порядке кадров, отбрасывая неудавшиеся
+        val capturedPaths = ArrayList<String>(n)
+        val focusPoints = ArrayList<Pair<Float, Float>>(n)
+        for (idx in 0 until n) {
+            val p = pathSlots[idx] ?: continue
+            capturedPaths.add(p)
+            focusSlots[idx]?.let { focusPoints.add(it) }
+        }
+
+        // Пишем JSON по завершении съёмки всех кадров
+        PipelineLogger.writeJson(this)
+
         runOnUiThread {
             overlayView.setCapturingMode(false)
         }
 
         if (capturedPaths.size >= 2) {
-            // Проверяем режим "только съёмка" ← NEW
             if (AppSettings.isCaptureOnly(this)) {
                 runOnUiThread {
                     hideProgress()
@@ -837,7 +964,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ======================== UI HELPERS ========================
+    private fun ImageProxy.toJpegBytes(): ByteArray {
+        val buffer = planes[0].buffer
+        val bytes = ByteArray(buffer.remaining())
+        buffer.get(bytes)
+        return bytes
+    }
 
+    private fun applyExifRotation(file: File, rotationDegrees: Int) {
+        val orientation = when (rotationDegrees) {
+            90 -> ExifInterface.ORIENTATION_ROTATE_90
+            180 -> ExifInterface.ORIENTATION_ROTATE_180
+            270 -> ExifInterface.ORIENTATION_ROTATE_270
+            else -> ExifInterface.ORIENTATION_NORMAL
+        }
+        val exif = ExifInterface(file.absolutePath)
+        exif.setAttribute(ExifInterface.TAG_ORIENTATION, orientation.toString())
+        exif.saveAttributes()
+    }
     private fun showProgress(message: String) {
         runOnUiThread {
             progressBar.visibility = View.VISIBLE
@@ -880,5 +1024,6 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor.shutdown()
         processingExecutor.shutdown()
         mlKitDetector?.close()
+        saverExecutor.shutdown()
     }
 }

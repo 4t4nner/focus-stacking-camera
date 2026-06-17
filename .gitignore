@@ -12,6 +12,9 @@ local.properties
 *.local.properties
 
 /local.properties
+.idea/deploymentTargetSelector.xml
+.idea/vcs.xml
+.idea/gradle.xml
 /.idea/caches
 /.idea/libraries
 /.idea/modules.xml
