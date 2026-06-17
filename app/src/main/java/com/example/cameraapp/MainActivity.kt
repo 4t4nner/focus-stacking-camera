@@ -63,6 +63,10 @@ class MainActivity : AppCompatActivity() {
     private val saverExecutor: java.util.concurrent.ExecutorService =
         java.util.concurrent.Executors.newFixedThreadPool(2)
 
+    // Пул для сохранения снимка с точками (параллельно серии)
+    private val pointsShotExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor()
+
     // Чтобы дождаться, что ВСЕ файлы дописались, прежде чем завершить серию
     private val pendingSaves = java.util.concurrent.atomic.AtomicInteger(0)
     private val allSavesDone = java.util.concurrent.CountDownLatch(0) // пересоздаётся на старте серии
@@ -85,6 +89,9 @@ class MainActivity : AppCompatActivity() {
     private val isAnalyzing = AtomicBoolean(false)
     private var lastFpsTime = 0L
     private var frameCount = 0
+
+    @Volatile private var lastAnalysisWidth: Int = 0
+    @Volatile private var lastAnalysisHeight: Int = 0
 
     // Object detection results (used for capture)
     @Volatile
@@ -291,6 +298,8 @@ class MainActivity : AppCompatActivity() {
             val bitmap = imageProxyToBitmap(imageProxy)
             val srcWidth = imageProxy.width
             val srcHeight = imageProxy.height
+            lastAnalysisWidth = srcWidth
+            lastAnalysisHeight = srcHeight
 
             if (bitmap == null) {
                 imageProxy.close()
@@ -744,6 +753,119 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Рисует точки и их номера на копии bitmap.
+     * Координаты объектов (cx, cy) заданы в пространстве кадра ImageAnalysis,
+     * поэтому масштабируем их к размеру снимка.
+     */
+    private fun drawPointsOnBitmap(
+        src: Bitmap,
+        objects: List<DetectedObject>
+    ): Bitmap {
+        val result = src.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(result)
+
+        // Масштаб от системы координат детекций к фактическому снимку.
+        // detectedObjects заданы в координатах кадра анализа (analysisW x analysisH).
+        val analysisW = lastAnalysisWidth.takeIf { it > 0 } ?: result.width
+        val analysisH = lastAnalysisHeight.takeIf { it > 0 } ?: result.height
+        val scaleX = result.width.toFloat() / analysisW
+        val scaleY = result.height.toFloat() / analysisH
+
+        // Масштаб элементов под разрешение снимка
+        val baseScale = result.width / 1080f
+        val pointR = 16f * baseScale
+        val crossLen = 24f * baseScale
+
+        val pointPaint = Paint().apply { color = Color.RED; style = Paint.Style.FILL; isAntiAlias = true }
+        val pointStroke = Paint().apply {
+            style = Paint.Style.STROKE; color = Color.WHITE
+            strokeWidth = 4f * baseScale; isAntiAlias = true
+        }
+        val crossPaint = Paint().apply {
+            color = Color.WHITE; strokeWidth = 3f * baseScale; isAntiAlias = true
+        }
+        val numberPaint = Paint().apply {
+            color = Color.WHITE; textSize = 52f * baseScale; isAntiAlias = true
+            typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER
+        }
+        val numberBgPaint = Paint().apply {
+            color = Color.RED; style = Paint.Style.FILL; isAntiAlias = true
+        }
+
+        for ((index, obj) in objects.withIndex()) {
+            val cx = obj.cx * scaleX
+            val cy = obj.cy * scaleY
+
+            canvas.drawCircle(cx, cy, pointR, pointPaint)
+            canvas.drawCircle(cx, cy, pointR + 2f * baseScale, pointStroke)
+            canvas.drawLine(cx - crossLen, cy, cx + crossLen, cy, crossPaint)
+            canvas.drawLine(cx, cy - crossLen, cx, cy + crossLen, crossPaint)
+
+            val numStr = "${index + 1}"
+            val numW = numberPaint.measureText(numStr)
+            val r = (maxOf(numW, 52f * baseScale) / 2f) + 8f * baseScale
+            canvas.drawCircle(cx, cy - 50f * baseScale, r, numberBgPaint)
+            canvas.drawText(numStr, cx, cy - 35f * baseScale, numberPaint)
+        }
+
+        return result
+    }
+
+    @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
+    private fun capturePointsPreview(objects: List<DetectedObject>, timestamp: String) {
+        val ic = imageCapture ?: return
+
+        ic.takePicture(
+            cameraExecutor,
+            object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: ImageProxy) {
+                    val rotation = image.imageInfo.rotationDegrees
+                    val bytes = image.toJpegBytes()
+                    image.close()
+
+                    pointsShotExecutor.execute {
+                        try {
+                            var bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                ?: return@execute
+
+                            // Применяем поворот
+                            if (rotation != 0) {
+                                val m = Matrix().apply { postRotate(rotation.toFloat()) }
+                                val rotated = Bitmap.createBitmap(
+                                    bmp, 0, 0, bmp.width, bmp.height, m, true
+                                )
+                                if (rotated != bmp) bmp.recycle()
+                                bmp = rotated
+                            }
+
+                            val annotated = drawPointsOnBitmap(bmp, objects)
+                            if (annotated != bmp) bmp.recycle()
+
+                            val file = File(outputDir, "POINTS_${timestamp}.jpg")
+                            FileOutputStream(file).use {
+                                annotated.compress(Bitmap.CompressFormat.JPEG, 95, it)
+                            }
+                            annotated.recycle()
+
+                            val intent = Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE)
+                            intent.data = Uri.fromFile(file)
+                            sendBroadcast(intent)
+
+                            Log.d(TAG, "Points preview saved: ${file.name}")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to save points preview", e)
+                        }
+                    }
+                }
+
+                override fun onError(e: ImageCaptureException) {
+                    Log.e(TAG, "Points preview capture failed", e)
+                }
+            }
+        )
+    }
+
     // ======================== CAPTURE ========================
 
     private fun startFocusStackCapture() {
@@ -760,15 +882,19 @@ class MainActivity : AppCompatActivity() {
         overlayView.setCapturingMode(true)
         showProgress("Capturing focus stack...")
 
+        // Снимок с точками — параллельно серии, на основную камеру
+        val objectsSnapshot = detectedObjects
+        val sessionTimestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        capturePointsPreview(objectsSnapshot, sessionTimestamp)
+
         processingExecutor.execute {
-            captureSequence(detectedObjects)
+            captureSequence(objectsSnapshot, sessionTimestamp)
         }
     }
 
     @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
-    private fun captureSequence(objects: List<DetectedObject>) {
+    private fun captureSequence(objects: List<DetectedObject>, timestamp: String) {
         val n = objects.size
-        // Индексированные слоты — порядок сохраняется, synchronized не нужен
         val pathSlots = arrayOfNulls<String>(n)
         val focusSlots = arrayOfNulls<Pair<Float, Float>>(n)
         val savesRemaining = java.util.concurrent.atomic.AtomicInteger(0)
@@ -1025,5 +1151,6 @@ class MainActivity : AppCompatActivity() {
         processingExecutor.shutdown()
         mlKitDetector?.close()
         saverExecutor.shutdown()
+        pointsShotExecutor.shutdown()
     }
 }

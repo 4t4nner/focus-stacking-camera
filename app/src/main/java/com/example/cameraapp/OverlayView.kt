@@ -17,11 +17,7 @@ class OverlayView @JvmOverloads constructor(
     private val boxPaintGreen = Paint().apply {
         color = Color.GREEN; style = Paint.Style.STROKE; strokeWidth = 6f; isAntiAlias = true
     }
-    private val boxPaintRed = Paint().apply {
-        color = Color.RED; style = Paint.Style.STROKE; strokeWidth = 6f; isAntiAlias = true
-    }
     private val fillPaintGreen = Paint().apply { color = Color.GREEN; style = Paint.Style.FILL }
-    private val fillPaintRed = Paint().apply { color = Color.RED; style = Paint.Style.FILL }
 
     private val textPaint = Paint().apply {
         color = Color.WHITE; textSize = 40f; isAntiAlias = true; typeface = Typeface.DEFAULT_BOLD
@@ -30,7 +26,10 @@ class OverlayView @JvmOverloads constructor(
         color = Color.WHITE; textSize = 52f; isAntiAlias = true; typeface = Typeface.DEFAULT_BOLD
         textAlign = Paint.Align.CENTER
     }
-    private val numberBgPaint = Paint().apply {
+    private val numberBgPaintGreen = Paint().apply {
+        color = Color.GREEN; style = Paint.Style.FILL; isAntiAlias = true
+    }
+    private val numberBgPaintRed = Paint().apply {
         color = Color.RED; style = Paint.Style.FILL; isAntiAlias = true
     }
 
@@ -69,9 +68,8 @@ class OverlayView @JvmOverloads constructor(
         val offsetX = (viewW - sourceWidth * scale) / 2f
         val offsetY = (viewH - sourceHeight * scale) / 2f
 
-        val boxPaint = if (capturingMode) boxPaintRed else boxPaintGreen
-        val fillPaint = if (capturingMode) fillPaintRed else fillPaintGreen
         val pointPaint = if (capturingMode) pointPaintRed else pointPaintGreen
+        val numberBgPaint = if (capturingMode) numberBgPaintRed else numberBgPaintGreen
 
         for ((index, det) in detections.withIndex()) {
             val left = det.x1 * scale + offsetX
@@ -79,30 +77,32 @@ class OverlayView @JvmOverloads constructor(
             val right = det.x2 * scale + offsetX
             val bottom = det.y2 * scale + offsetY
 
-            canvas.drawRect(left, top, right, bottom, boxPaint)
-
             val cx = (left + right) / 2f
             val cy = (top + bottom) / 2f
 
-            if (capturingMode) {
-                // Номер над центральной точкой''
-                val numStr = "${index + 1}"
-                val numW = numberPaint.measureText(numStr)
-                val r = (maxOf(numW, 52f) / 2f) + 8f
-                canvas.drawCircle(cx, cy - 50f, r, numberBgPaint)
-                canvas.drawText(numStr, cx, cy - 35f, numberPaint)
-            } else {
+            // Рамки — только в preview (не в режиме захвата)
+            if (!capturingMode) {
+                canvas.drawRect(left, top, right, bottom, boxPaintGreen)
+
                 val label = "${det.className} ${(det.confidence * 100).toInt()}%"
                 val textW = textPaint.measureText(label)
                 val textH = 44f
-                canvas.drawRect(left, top - textH - 8, left + textW + 12, top, fillPaint)
+                canvas.drawRect(left, top - textH - 8, left + textW + 12, top, fillPaintGreen)
                 canvas.drawText(label, left + 6, top - 12, textPaint)
             }
 
+            // Точка + крест — в обоих режимах
             canvas.drawCircle(cx, cy, 16f, pointPaint)
             canvas.drawCircle(cx, cy, 18f, pointStroke)
             canvas.drawLine(cx - 24, cy, cx + 24, cy, crossPaint)
             canvas.drawLine(cx, cy - 24, cx, cy + 24, crossPaint)
+
+            // Номер рядом с точкой — в обоих режимах
+            val numStr = "${index + 1}"
+            val numW = numberPaint.measureText(numStr)
+            val r = (maxOf(numW, 52f) / 2f) + 8f
+            canvas.drawCircle(cx, cy - 50f, r, numberBgPaint)
+            canvas.drawText(numStr, cx, cy - 35f, numberPaint)
         }
     }
 }
