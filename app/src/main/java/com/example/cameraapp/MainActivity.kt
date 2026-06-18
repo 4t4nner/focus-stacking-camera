@@ -201,9 +201,8 @@ class MainActivity : AppCompatActivity() {
 
         clearPointsIB.setOnClickListener {
             if (isCapturing) return@setOnClickListener
-            manualSettings.clear()
-            overlayView.clearManualPoints()
-            updateCaptureButtonState()
+
+            clearManualPointsAll()
         }
 
         if (allPermissionsGranted()) {
@@ -212,7 +211,11 @@ class MainActivity : AppCompatActivity() {
             ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS)
         }
     }
-
+    private fun clearManualPointsAll() {
+        manualSettings.clear()
+        overlayView.clearManualPoints()
+        updateCaptureButtonState()
+    }
     // ======================== ДЕТЕКТОРЫ ========================
 
     private fun reinitDetectors() {
@@ -1287,12 +1290,14 @@ class MainActivity : AppCompatActivity() {
 
         if (capturedPaths.size >= 2) {
             if (AppSettings.isCaptureOnly(this)) {
+                // "Stop after capture": дальнейшей обработки нет — чистим точки здесь.
                 runOnUiThread {
                     hideProgress()
                     captureIB.visibility = View.VISIBLE
                     folderIB.visibility = View.VISIBLE
                     overlayView.visibility = View.VISIBLE
                     isCapturing = false
+                    clearManualPointsAll()
                     Toast.makeText(
                         this,
                         "Saved ${capturedPaths.size} frames to ${outputDir.name}. " +
@@ -1301,6 +1306,10 @@ class MainActivity : AppCompatActivity() {
                     ).show()
                 }
             } else {
+                // Будет обработка (processImageStack) — точки больше не нужны, чистим сразу.
+                runOnUiThread {
+                    clearManualPointsAll()
+                }
                 processImageStack(capturedPaths, focusPoints)
             }
         } else {
@@ -1309,9 +1318,11 @@ class MainActivity : AppCompatActivity() {
                 captureIB.visibility = View.VISIBLE
                 folderIB.visibility = View.VISIBLE
                 isCapturing = false
+                clearManualPointsAll()
                 Toast.makeText(this, "Not enough images captured", Toast.LENGTH_SHORT).show()
             }
         }
+
     }
 
     // ======================== CAPTURE ========================
