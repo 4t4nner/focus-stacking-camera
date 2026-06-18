@@ -15,6 +15,11 @@ object AppSettings {
     private const val KEY_REMOTE_ENABLED = "remote_enabled"
     private const val KEY_DETECTOR = "detector_type"  // ← NEW
     private const val KEY_CAPTURE_ONLY = "capture_only"
+    private const val KEY_CAPTURE_MODE = "capture_mode"
+
+    // Значения режима съёмки
+    const val MODE_AUTO = "auto"
+    const val MODE_MANUAL = "manual"
 
     // Значения детектора
     const val DETECTOR_MLKIT = "mlkit"
@@ -52,6 +57,18 @@ object AppSettings {
     //
     fun setDetector(context: Context, detector: String) {
         prefs(context).edit().putString(KEY_DETECTOR, detector).apply()
+    }
+    // Режим съёмки (по умолчанию AUTO — сохраняем текущее поведение)
+    fun getCaptureMode(context: Context): String {
+        return prefs(context).getString(KEY_CAPTURE_MODE, MODE_AUTO) ?: MODE_AUTO
+    }
+
+    fun setCaptureMode(context: Context, mode: String) {
+        prefs(context).edit().putString(KEY_CAPTURE_MODE, mode).apply()
+    }
+
+    fun isManualMode(context: Context): Boolean {
+        return getCaptureMode(context) == MODE_MANUAL
     }
 
     fun save(context: Context, host: String, port: Int, enabled: Boolean) {

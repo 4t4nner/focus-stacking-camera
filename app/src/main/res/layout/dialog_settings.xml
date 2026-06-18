@@ -4,8 +4,36 @@
     android:layout_height="wrap_content"
     android:orientation="vertical"
     android:padding="24dp">
+    <!-- ===== Режим съёмки ===== -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="Capture mode"
+        android:textStyle="bold"
+        android:textSize="16sp" />
 
-    <!-- ==== Capture-only mode (NEW) ==== -->
+    <RadioGroup
+        android:id="@+id/captureModeRadioGroup"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:layout_marginTop="4dp">
+
+        <RadioButton
+            android:id="@+id/captureModeAutoRB"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Auto (focus on all detected objects)" />
+
+        <RadioButton
+            android:id="@+id/captureModeManualRB"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Manual (tap objects to set focus)" />
+    </RadioGroup>
+
+    <!-- ==== Capture-only mode ==== -->
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"

@@ -36,6 +36,7 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.exifinterface.media.ExifInterface
+import android.hardware.camera2.CameraMetadata
 
 class MainActivity : AppCompatActivity() {
 
@@ -44,7 +45,7 @@ class MainActivity : AppCompatActivity() {
         private const val REQUEST_CODE_PERMISSIONS = 10
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
-
+    private lateinit var clearPointsIB: ImageButton
     private lateinit var settingsIB: ImageButton
     private lateinit var previewView: PreviewView
     private lateinit var overlayView: OverlayView
@@ -80,6 +81,25 @@ class MainActivity : AppCompatActivity() {
     // Последнее измеренное фокусное расстояние (диоптрии, 1/м)
     @Volatile
     private var lastFocusDistance: Float? = null
+
+    // ===== РУЧНОЙ РЕЖИМ =====
+
+    // Последние "живые" значения из CaptureResult (обновляются в setSessionCaptureCallback).
+    // Используются при тапе для сохранения настроек точки.
+    @Volatile private var lastExposureTimeNs: Long? = null
+    @Volatile private var lastIso: Int? = null
+    @Volatile private var lastAfState: Int? = null
+    @Volatile private var lastAeState: Int? = null
+
+    // Настройки точек в ручном режиме. Индекс = detectionIndex.
+    // Заполняется при тапах пользователя.
+    private val manualSettings = java.util.concurrent.ConcurrentHashMap<Int, ManualFrameSettings>()
+
+    // Идёт ли сейчас конвергенция AF/AE по тапу (защита от повторных тапов).
+    private val isMeteringForTap = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    // Текущий режим (кэш; читается из AppSettings при onResume/после настроек).
+    @Volatile private var isManualMode: Boolean = false
 
     // ===== ДЕТЕКЦИЯ =====
     private var yoloDetector: YoloDetector? = null
@@ -146,6 +166,7 @@ class MainActivity : AppCompatActivity() {
         serverStatusTV = findViewById(R.id.serverStatusTV)
         progressBar = findViewById(R.id.progressBar)
         progressTV = findViewById(R.id.progressTV)
+        clearPointsIB = findViewById(R.id.clearPointsIB)
 
         cameraExecutor = Executors.newSingleThreadExecutor()
         processingExecutor = Executors.newFixedThreadPool(2)
@@ -154,6 +175,12 @@ class MainActivity : AppCompatActivity() {
         initDetectors()
 
         refreshRemoteStatus()
+
+        // Подключаем обработчик ручных тапов (OverlayView сам обрабатывает касания
+        // и отдаёт координаты в системе кадра анализа).
+        overlayView.onManualTap = { cx, cy ->
+            handleManualTap(cx, cy)
+        }
 
         settingsIB.setOnClickListener {
             SettingsDialog(this) {
@@ -170,6 +197,13 @@ class MainActivity : AppCompatActivity() {
 
         folderIB.setOnClickListener {
             openFilePicker()
+        }
+
+        clearPointsIB.setOnClickListener {
+            if (isCapturing) return@setOnClickListener
+            manualSettings.clear()
+            overlayView.clearManualPoints()
+            updateCaptureButtonState()
         }
 
         if (allPermissionsGranted()) {
@@ -221,6 +255,160 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread { fpsTV.text = "ML Kit ready" }
         }
     }
+
+    // ======================== РУЧНОЙ / АВТО РЕЖИМ ========================
+
+    /**
+     * Считывает режим из настроек и применяет: глушит/включает детектор,
+     * показывает/прячет кнопку очистки, сбрасывает ручные точки.
+     */
+    private fun applyCaptureMode() {
+        val manual = AppSettings.isManualMode(this)
+        val modeChanged = (manual != isManualMode)
+        isManualMode = manual
+
+        // ВСЕГДА синхронизируем состояние OverlayView (даже если режим не менялся),
+        // иначе после съёмки manualMode в OverlayView может остаться рассинхронизированным
+        // и ручные точки перестанут рисоваться.
+        overlayView.setManualMode(manual)
+        overlayView.setAnalysisSize(lastAnalysisWidth, lastAnalysisHeight)
+
+        if (modeChanged) {
+            // Сброс предыдущих ручных данных при переключении режима
+            manualSettings.clear()
+            overlayView.clearManualPoints()
+        }
+
+        if (manual) {
+            detectedObjects = emptyList()
+            clearPointsIB.visibility = View.VISIBLE
+            fpsTV.text = "MANUAL"
+        } else {
+            clearPointsIB.visibility = View.GONE
+            overlayView.clearManualPoints()
+        }
+        updateCaptureButtonState()
+    }
+
+    /** В ручном режиме кнопка съёмки активна только при >= 2 точках. */
+    private fun updateCaptureButtonState() {
+        if (isManualMode) {
+            val enough = overlayView.manualPointCount() >= 2
+            captureIB.isEnabled = enough
+            captureIB.alpha = if (enough) 1.0f else 0.4f
+        } else {
+            captureIB.isEnabled = true
+            captureIB.alpha = 1.0f
+        }
+    }
+
+    /**
+     * Обработка тапа в ручном режиме: добавляем точку, запускаем AF/AE
+     * на ней, после сходимости считываем параметры и сохраняем в manualSettings.
+     */
+    private fun handleManualTap(cx: Float, cy: Float) {
+        if (!isManualMode || isCapturing) return
+
+        // Защита от параллельных замеров
+        if (!isMeteringForTap.compareAndSet(false, true)) {
+            Toast.makeText(this, "Focusing… wait", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Индекс новой точки = текущее количество ручных точек
+        val pointIndex = overlayView.manualPointCount()
+        overlayView.addManualPoint(cx, cy)
+        updateCaptureButtonState()
+
+        // Предварительная запись настроек (ещё не настроена)
+        val settings = ManualFrameSettings(
+            detectionIndex = pointIndex,
+            label = "P${pointIndex + 1}",
+            cx = cx,
+            cy = cy,
+            rect = RectF(cx - 1f, cy - 1f, cx + 1f, cy + 1f)
+        )
+        manualSettings[pointIndex] = settings
+
+        // Преобразование координат кадра анализа -> координаты previewView.
+        val aw = lastAnalysisWidth.takeIf { it > 0 } ?: 1
+        val ah = lastAnalysisHeight.takeIf { it > 0 } ?: 1
+        val fx = (cx / aw) * previewView.width
+        val fy = (cy / ah) * previewView.height
+
+        Log.d(TAG, "TAP idx=$pointIndex cx=$cx cy=$cy aw=$aw ah=$ah -> fx=$fx fy=$fy preview=${previewView.width}x${previewView.height}")
+
+        try {
+            val meteringPoint = previewView.meteringPointFactory.createPoint(fx, fy)
+            val action = FocusMeteringAction.Builder(
+                meteringPoint,
+                FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+            )
+                .setAutoCancelDuration(5, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
+
+            val future = camera?.cameraControl?.startFocusAndMetering(action)
+            if (future == null) {
+                isMeteringForTap.set(false)
+                return
+            }
+
+            future.addListener({
+                // AF/AE future завершился, НО линза/сенсор и preview-метаданные обновляются
+                // с задержкой в несколько кадров. Даём время доехать и обновить
+                // lastFocusDistance/lastIso/lastExposureTimeNs, иначе для разных точек
+                // считаются устаревшие (одинаковые) значения.
+                overlayView.postDelayed({
+                    val focus = lastFocusDistance
+                    val exp = lastExposureTimeNs
+                    val iso = lastIso
+
+                    settings.focusDistanceDiopters = focus
+                    settings.exposureTimeNs = exp
+                    settings.iso = iso
+                    settings.configured = (focus != null || exp != null || iso != null)
+
+                    Log.d(TAG, "POINT idx=$pointIndex configured focus=$focus iso=$iso exp=$exp")
+
+                    overlayView.setManualPointConfigured(pointIndex, settings.configured)
+                    val fm = focus?.let { if (it > 0f) "%.2fm".format(1f / it) else "∞" } ?: "?"
+                    Toast.makeText(
+                        this,
+                        "Point ${pointIndex + 1}: focus=$fm iso=${iso ?: "?"}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+
+                    isMeteringForTap.set(false)
+                }, 400)  // 400 мс на доезд линзы + обновление метаданных preview-потока
+
+            }, ContextCompat.getMainExecutor(this))
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Manual tap metering failed", e)
+            isMeteringForTap.set(false)
+        }
+    }
+    /**
+     * Собирает список объектов для съёмки из ручных точек.
+     * Порядок = порядок добавления (индекс точки), что совпадает
+     * с ключами manualSettings и detectionIndex.
+     */
+    private fun buildManualObjects(): List<DetectedObject> {
+        val count = manualSettings.size
+        val list = ArrayList<DetectedObject>(count)
+        for (idx in 0 until count) {
+            val ms = manualSettings[idx] ?: continue
+            list.add(
+                DetectedObject(
+                    label = ms.label,
+                    cx = ms.cx,
+                    cy = ms.cy,
+                    rect = ms.rect
+                )
+            )
+        }
+        return list
+    }
     // ======================== CAMERA SETUP с ДЕТЕКЦИЕЙ ========================
 
     @OptIn(ExperimentalCamera2Interop::class)
@@ -229,8 +417,33 @@ class MainActivity : AppCompatActivity() {
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
 
-            // 1. Preview
-            val preview = Preview.Builder().build().also {
+            // 1. Preview + чтение метаданных живого потока (для ручного режима)
+            val previewBuilder = Preview.Builder()
+
+            Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult
+                    ) {
+                        // Обновляем "живые" значения параметров на каждом preview-кадре.
+                        result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let {
+                            lastFocusDistance = it
+                        }
+                        result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let {
+                            lastExposureTimeNs = it
+                        }
+                        result.get(CaptureResult.SENSOR_SENSITIVITY)?.let {
+                            lastIso = it
+                        }
+                        lastAfState = result.get(CaptureResult.CONTROL_AF_STATE)
+                        lastAeState = result.get(CaptureResult.CONTROL_AE_STATE)
+                    }
+                }
+            )
+
+            val preview = previewBuilder.build().also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
 
@@ -288,6 +501,16 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // В ручном режиме детектор заглушён — только фиксируем размеры кадра для маппинга тапа.
+        if (isManualMode) {
+            lastAnalysisWidth = imageProxy.width
+            lastAnalysisHeight = imageProxy.height
+            // КРИТИЧНО: обновляем размеры в OverlayView, иначе тап маппится по source=1x1
+            // и onTouchEvent отбрасывает касание (точка не добавится).
+            overlayView.setAnalysisSize(imageProxy.width, imageProxy.height)
+            imageProxy.close()
+            return
+        }
         // Пропускаем если предыдущий анализ ещё не завершён
         if (!isAnalyzing.compareAndSet(false, true)) {
             imageProxy.close()
@@ -813,8 +1036,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
-    private fun capturePointsPreview(objects: List<DetectedObject>, timestamp: String) {
-        val ic = imageCapture ?: return
+    private fun capturePointsPreview(
+        objects: List<DetectedObject>,
+        timestamp: String,
+        onDone: (() -> Unit)? = null
+    ) {
+        val ic = imageCapture
+        if (ic == null) {
+            onDone?.invoke()
+            return
+        }
 
         ic.takePicture(
             cameraExecutor,
@@ -823,13 +1054,14 @@ class MainActivity : AppCompatActivity() {
                     val rotation = image.imageInfo.rotationDegrees
                     val bytes = image.toJpegBytes()
                     image.close()
+                    // Кадр уже в памяти — можно освобождать вызывающего.
+                    onDone?.invoke()
 
                     pointsShotExecutor.execute {
                         try {
                             var bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                                 ?: return@execute
 
-                            // Применяем поворот
                             if (rotation != 0) {
                                 val m = Matrix().apply { postRotate(rotation.toFloat()) }
                                 val rotated = Bitmap.createBitmap(
@@ -861,45 +1093,291 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onError(e: ImageCaptureException) {
                     Log.e(TAG, "Points preview capture failed", e)
+                    onDone?.invoke()
                 }
             }
         )
     }
 
+    @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
+    private fun captureSequenceManual(objects: List<DetectedObject>, sessionTimestamp: String) {
+        val n = objects.size
+        val pathSlots = arrayOfNulls<String>(n)
+        val focusSlots = arrayOfNulls<Pair<Float, Float>>(n)
+        val savesRemaining = java.util.concurrent.atomic.AtomicInteger(0)
+
+        val timestamp = sessionTimestamp
+
+        PipelineLogger.startSession()
+
+        // ===== POINTS-кадр ПЕРВЫМ, пока камера ещё в авто-экспозиции =====
+        // Дожидаемся завершения захвата, ЗАТЕМ выставляем ручные AE/AF.
+        val pointsLatch = java.util.concurrent.CountDownLatch(1)
+        capturePointsPreview(objects, timestamp) {
+            pointsLatch.countDown()
+        }
+        pointsLatch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+
+        val cam2Control = camera?.cameraControl?.let { Camera2CameraControl.from(it) }
+
+        for ((i, obj) in objects.withIndex()) {
+            // Сопоставление точки и её ручных настроек.
+            // ВНИМАНИЕ: предполагается detectionIndex == позиция i.
+            val ms = manualSettings[i]
+            if (ms == null || !ms.configured) {
+                Log.w(TAG, "Manual settings missing for index $i, skipping")
+                continue
+            }
+
+            runOnUiThread {
+                updateProgress("Capturing ${i + 1}/${objects.size}: ${obj.label}")
+            }
+
+            try {
+                // ===== Выставляем ручные параметры: AF_OFF + фокус, AE_OFF + выдержка/ISO =====
+                val applyStart = System.currentTimeMillis()
+
+                val optsBuilder = CaptureRequestOptions.Builder()
+
+                // Фокус
+                ms.focusDistanceDiopters?.let { fd ->
+                    optsBuilder
+                        .setCaptureRequestOption(
+                            CaptureRequest.CONTROL_AF_MODE,
+                            CameraMetadata.CONTROL_AF_MODE_OFF
+                        )
+                        .setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, fd)
+                }
+
+                // Экспозиция (только если есть оба параметра — иначе оставляем AE авто)
+                val expNs = ms.exposureTimeNs
+                val iso = ms.iso
+                if (expNs != null && iso != null) {
+                    optsBuilder
+                        .setCaptureRequestOption(
+                            CaptureRequest.CONTROL_AE_MODE,
+                            CameraMetadata.CONTROL_AE_MODE_OFF
+                        )
+                        .setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, expNs)
+                        .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, iso)
+                }
+
+                cam2Control?.setCaptureRequestOptions(optsBuilder.build())
+
+                // Даём сенсору/линзе время приехать на заданные значения.
+                // Фокус-моторчику нужно ~200–400 мс на перемещение.
+                Thread.sleep(350)
+                val applyDurationMs = System.currentTimeMillis() - applyStart
+
+                // ===== Захват =====
+                val filename = "DET_${timestamp}_${i + 1}_${obj.cx.toInt()}x${obj.cy.toInt()}.jpg"
+                val file = File(outputDir, filename)
+
+                val captureStart = SystemClock.elapsedRealtime()
+                val captureLatch = java.util.concurrent.CountDownLatch(1)
+
+                savesRemaining.incrementAndGet()
+
+                imageCapture?.takePicture(
+                    cameraExecutor,
+                    object : ImageCapture.OnImageCapturedCallback() {
+                        override fun onCaptureSuccess(image: ImageProxy) {
+                            val capturedAt = SystemClock.elapsedRealtime()
+                            val sensorEncodeMs = capturedAt - captureStart
+
+                            val rotation = image.imageInfo.rotationDegrees
+                            val bytes = image.toJpegBytes()
+                            image.close()
+                            captureLatch.countDown()
+
+                            saverExecutor.execute {
+                                val saveStart = SystemClock.elapsedRealtime()
+                                try {
+                                    file.outputStream().use { it.write(bytes) }
+                                    applyExifRotation(file, rotation)
+
+                                    pathSlots[i] = file.absolutePath
+                                    focusSlots[i] = Pair(obj.cx, obj.cy)
+
+                                    val intent = Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE)
+                                    intent.data = Uri.fromFile(file)
+                                    sendBroadcast(intent)
+
+                                    val saveEnd = SystemClock.elapsedRealtime()
+                                    PipelineLogger.stage(i + 1, "sensor_encode", sensorEncodeMs)
+                                    PipelineLogger.stage(i + 1, "disk_write", saveEnd - saveStart)
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Save failed for $filename", e)
+                                } finally {
+                                    savesRemaining.decrementAndGet()
+                                }
+                            }
+                        }
+
+                        override fun onError(e: ImageCaptureException) {
+                            Log.e(TAG, "Capture failed for $filename", e)
+                            savesRemaining.decrementAndGet()
+                            captureLatch.countDown()
+                        }
+                    }
+                )
+
+                captureLatch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                val captureEnd = SystemClock.elapsedRealtime()
+                val captureDurationMs = captureEnd - captureStart
+
+                PipelineLogger.stage(i + 1, "manual_apply", applyDurationMs.toLong())
+
+                // ===== Лог кадра (используем зафиксированные при тапе значения) =====
+                val diopters = ms.focusDistanceDiopters
+                val meters = diopters?.let { if (it > 0f) 1f / it else null }
+                PipelineLogger.logFrame(
+                    PipelineLogger.FrameLog(
+                        index = i + 1,
+                        label = obj.label,
+                        focusDistanceDiopters = diopters,
+                        focusDistanceMeters = meters,
+                        focusDurationMs = applyDurationMs.toLong(),
+                        captureDurationMs = captureDurationMs
+                    )
+                )
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Error capturing manual frame $i", e)
+            }
+        }
+
+        // ===== Снимаем ручные ограничения, возвращаем авто =====
+        cam2Control?.setCaptureRequestOptions(
+            CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AF_MODE,
+                    CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                )
+                .setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AE_MODE,
+                    CameraMetadata.CONTROL_AE_MODE_ON
+                )
+                .build()
+        )
+
+        // ===== Дожидаемся записи всех файлов =====
+        val waitStart = SystemClock.elapsedRealtime()
+        while (savesRemaining.get() > 0) {
+            Thread.sleep(10)
+            if (SystemClock.elapsedRealtime() - waitStart > 15_000) {
+                Log.w(TAG, "Timeout waiting for disk saves, remaining=${savesRemaining.get()}")
+                break
+            }
+        }
+
+        val capturedPaths = ArrayList<String>(n)
+        val focusPoints = ArrayList<Pair<Float, Float>>(n)
+        for (idx in 0 until n) {
+            val p = pathSlots[idx] ?: continue
+            capturedPaths.add(p)
+            focusSlots[idx]?.let { focusPoints.add(it) }
+        }
+
+        PipelineLogger.writeJson(this)
+
+        runOnUiThread {
+            overlayView.setCapturingMode(false)
+        }
+
+        if (capturedPaths.size >= 2) {
+            if (AppSettings.isCaptureOnly(this)) {
+                runOnUiThread {
+                    hideProgress()
+                    captureIB.visibility = View.VISIBLE
+                    folderIB.visibility = View.VISIBLE
+                    overlayView.visibility = View.VISIBLE
+                    isCapturing = false
+                    Toast.makeText(
+                        this,
+                        "Saved ${capturedPaths.size} frames to ${outputDir.name}. " +
+                                "Process later via folder button.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } else {
+                processImageStack(capturedPaths, focusPoints)
+            }
+        } else {
+            runOnUiThread {
+                hideProgress()
+                captureIB.visibility = View.VISIBLE
+                folderIB.visibility = View.VISIBLE
+                isCapturing = false
+                Toast.makeText(this, "Not enough images captured", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     // ======================== CAPTURE ========================
 
     private fun startFocusStackCapture() {
-        if (detectedObjects.isEmpty()) {
-            Toast.makeText(this, "No objects detected to focus on", Toast.LENGTH_SHORT).show()
+        isManualMode = AppSettings.isManualMode(this)
+
+        // Источник объектов зависит от режима
+        val objectsSnapshot: List<DetectedObject> = if (isManualMode) {
+            buildManualObjects()
+        } else {
+            detectedObjects
+        }
+
+        if (objectsSnapshot.isEmpty()) {
+            Toast.makeText(this, "No points to focus on", Toast.LENGTH_SHORT).show()
             return
+        }
+
+        if (isManualMode) {
+            val notConfigured = objectsSnapshot.indices.any { idx ->
+                manualSettings[idx]?.configured != true
+            }
+            if (notConfigured) {
+                Toast.makeText(
+                    this,
+                    "Не все точки настроены. Тапните по каждой и дождитесь фокусировки.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+            if (objectsSnapshot.size < 2) {
+                Toast.makeText(this, "Нужно минимум 2 точки", Toast.LENGTH_SHORT).show()
+                return
+            }
         }
 
         isCapturing = true
         captureIB.visibility = View.GONE
         folderIB.visibility = View.GONE
 
-        // Показать overlay в режиме захвата (нумерация объектов)
         overlayView.setCapturingMode(true)
-        showProgress("Capturing focus stack...")
+        showProgress(if (isManualMode) "Capturing (manual)..." else "Capturing focus stack...")
 
-        // Снимок с точками — параллельно серии, на основную камеру
-        val objectsSnapshot = detectedObjects
         val sessionTimestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        capturePointsPreview(objectsSnapshot, sessionTimestamp)
 
-        processingExecutor.execute {
-            captureSequence(objectsSnapshot, sessionTimestamp)
+        if (isManualMode) {
+            // POINTS-кадр снимается ВНУТРИ captureSequenceManual ПЕРВЫМ,
+            // пока камера ещё в авто-экспозиции (иначе кадр будет чёрным
+            // из-за уже выставленных AE_OFF/ручной выдержки).
+            processingExecutor.execute {
+                captureSequenceManual(objectsSnapshot, sessionTimestamp)
+            }
+        } else {
+            capturePointsPreview(objectsSnapshot, sessionTimestamp)
+            processingExecutor.execute {
+                captureSequence(objectsSnapshot, sessionTimestamp)
+            }
         }
     }
-
     @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
     private fun captureSequence(objects: List<DetectedObject>, timestamp: String) {
         val n = objects.size
         val pathSlots = arrayOfNulls<String>(n)
         val focusSlots = arrayOfNulls<Pair<Float, Float>>(n)
         val savesRemaining = java.util.concurrent.atomic.AtomicInteger(0)
-
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
         PipelineLogger.startSession()
 
@@ -1144,7 +1622,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
-
+    override fun onResume() {
+        super.onResume()
+        applyCaptureMode()
+    }
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()

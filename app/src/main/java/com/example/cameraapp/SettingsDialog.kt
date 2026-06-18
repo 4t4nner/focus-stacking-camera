@@ -28,6 +28,9 @@ class SettingsDialog(
         val detectorMlKitRB = view.findViewById<RadioButton>(R.id.detectorMlKitRB)
         val detectorYoloRB = view.findViewById<RadioButton>(R.id.detectorYoloRB)
 
+        val captureModeRadioGroup = view.findViewById<RadioGroup>(R.id.captureModeRadioGroup)
+        val captureModeAutoRB = view.findViewById<RadioButton>(R.id.captureModeAutoRB)
+        val captureModeManualRB = view.findViewById<RadioButton>(R.id.captureModeManualRB)
         val remoteSwitch = view.findViewById<Switch>(R.id.remoteEnabledSwitch)
         val hostET = view.findViewById<TextInputEditText>(R.id.serverHostET)
         val portET = view.findViewById<TextInputEditText>(R.id.serverPortET)
@@ -39,6 +42,12 @@ class SettingsDialog(
         when (AppSettings.getDetector(context)) {
             AppSettings.DETECTOR_YOLO -> detectorYoloRB.isChecked = true
             else -> detectorMlKitRB.isChecked = true
+        }
+
+        // Load capture mode
+        when (AppSettings.getCaptureMode(context)) {
+            AppSettings.MODE_MANUAL -> captureModeManualRB.isChecked = true
+            else -> captureModeAutoRB.isChecked = true
         }
 
         // Load current values
@@ -102,6 +111,11 @@ class SettingsDialog(
                 val detector = if (detectorYoloRB.isChecked)
                     AppSettings.DETECTOR_YOLO else AppSettings.DETECTOR_MLKIT
                 AppSettings.setDetector(context, detector)
+
+                // Save capture mode
+                val mode = if (captureModeManualRB.isChecked)
+                    AppSettings.MODE_MANUAL else AppSettings.MODE_AUTO
+                AppSettings.setCaptureMode(context, mode)
 
                 val host = hostET.text.toString().trim()
                 val port = portET.text.toString().toIntOrNull() ?: 5000
