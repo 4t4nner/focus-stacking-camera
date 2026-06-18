@@ -401,10 +401,12 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
         app.logger.error(f"[Job {job_id}]   ERROR: {e}")
 
 def _apply_yolo_refinement(
-    job_id: str,
-    session_dir: str,
-    reference_image: np.ndarray,
-    focus_map: np.ndarray,
+        job_id: str,
+        session_dir: str,
+        reference_image: np.ndarray,
+        focus_map: np.ndarray,
+        focus_points: list,
+        forced_zone: "np.ndarray | None" = None,
 ) -> np.ndarray:
     """Run YOLO segmentation on reference image and refine focus map."""
     if not _yolo_available:
@@ -427,7 +429,10 @@ def _apply_yolo_refinement(
         )
 
         refined = refine_focus_map_with_objects(
-            focus_map, objects, session_dir=session_dir
+            focus_map, objects,
+            focus_points=focus_points,
+            forced_zone=forced_zone,
+            session_dir=session_dir,
         )
 
         return refined
@@ -438,7 +443,6 @@ def _apply_yolo_refinement(
         )
         traceback.print_exc()
         return focus_map
-
 
 # ======================== API ENDPOINTS ========================
 

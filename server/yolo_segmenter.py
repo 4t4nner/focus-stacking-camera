@@ -157,7 +157,6 @@ def segment_objects(
     return objects
 
 
-
 def refine_focus_map_with_objects(
         focus_map: np.ndarray,
         objects: List[SegmentedObject],
@@ -247,7 +246,6 @@ def refine_focus_map_with_objects(
         _save_refinement_debug(focus_map, refined, objects, n_sources, session_dir)
 
     return refined
-
 
 def _save_refinement_debug(
     original_map: np.ndarray,
