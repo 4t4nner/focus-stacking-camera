@@ -12,6 +12,27 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import android.app.ActivityManager
+import android.os.Debug
+
+/** Снимок использования памяти. Все значения в мегабайтах. */
+data class MemoryLog(
+    val tag: String,            // метка момента ("app_start", "after_processing", ...)
+    // Память процесса (наиболее показательна)
+    val totalPssMb: Float,      // Proportional Set Size — суммарная память процесса
+    val dalvikPssMb: Float,     // Java/Kotlin часть
+    val nativePssMb: Float,     // native (OpenCV, ONNX, ML Kit)
+    // JVM heap
+    val javaHeapUsedMb: Float,
+    val javaHeapMaxMb: Float,   // лимит heap
+    // Устройство в целом
+    val deviceTotalMb: Float,
+    val deviceAvailMb: Float,
+    val deviceLowMemory: Boolean,
+    val memoryClassMb: Int      // разрешённый размер heap для процесса
+)
+
+
 /**
  * Собирает метрики пайплайна (фокусное расстояние, длительности по участкам)
  * и пишет их в logcat + в JSON-файл в Pictures/CameraApp.
@@ -37,10 +58,59 @@ object PipelineLogger {
     private val stages = mutableListOf<StageLog>()
     private var sessionStart = 0L
 
+    private val memorySnapshots = mutableListOf<MemoryLog>()
+
+    @Synchronized
+    fun logMemory(context: Context, tag: String): MemoryLog {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+
+        // --- Память процесса (PSS) ---
+        val debugInfo = Debug.MemoryInfo()
+        Debug.getMemoryInfo(debugInfo)
+        val totalPss  = debugInfo.totalPss / 1024f           // килобайты -> МБ
+        val dalvikPss = debugInfo.dalvikPss / 1024f
+        val nativePss = debugInfo.nativePss / 1024f
+
+        // --- JVM heap ---
+        val rt = Runtime.getRuntime()
+        val javaUsed = (rt.totalMemory() - rt.freeMemory()) / (1024f * 1024f)
+        val javaMax  = rt.maxMemory() / (1024f * 1024f)
+
+        // --- Память устройства ---
+        val devInfo = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(devInfo)
+        val devTotal = devInfo.totalMem / (1024f * 1024f)
+        val devAvail = devInfo.availMem / (1024f * 1024f)
+
+        val log = MemoryLog(
+            tag = tag,
+            totalPssMb = totalPss,
+            dalvikPssMb = dalvikPss,
+            nativePssMb = nativePss,
+            javaHeapUsedMb = javaUsed,
+            javaHeapMaxMb = javaMax,
+            deviceTotalMb = devTotal,
+            deviceAvailMb = devAvail,
+            deviceLowMemory = devInfo.lowMemory,
+            memoryClassMb = am.memoryClass
+        )
+
+        memorySnapshots.add(log)
+        Log.d(
+            TAG,
+            "MEMORY [$tag]: PSS=%.1fMB (dalvik=%.1f native=%.1f), " .format(totalPss, dalvikPss, nativePss) +
+                    "javaHeap=%.1f/%.1fMB, device avail=%.0f/%.0fMB%s"
+                        .format(javaUsed, javaMax, devAvail, devTotal,
+                            if (devInfo.lowMemory) " [LOW]" else "")
+        )
+        return log
+    }
+
     @Synchronized
     fun startSession() {
         frames.clear()
         stages.clear()
+        memorySnapshots.clear()
         sessionStart = System.currentTimeMillis()
         Log.d(TAG, "=== Session started ===")
     }
@@ -101,6 +171,23 @@ object PipelineLogger {
                 })
             }
             root.put("pipeline_stages", stagesArr)
+
+            val memArr = JSONArray()
+            for (m in memorySnapshots) {
+                memArr.put(JSONObject().apply {
+                    put("tag", m.tag)
+                    put("total_pss_mb", m.totalPssMb)
+                    put("dalvik_pss_mb", m.dalvikPssMb)
+                    put("native_pss_mb", m.nativePssMb)
+                    put("java_heap_used_mb", m.javaHeapUsedMb)
+                    put("java_heap_max_mb", m.javaHeapMaxMb)
+                    put("device_total_mb", m.deviceTotalMb)
+                    put("device_avail_mb", m.deviceAvailMb)
+                    put("device_low_memory", m.deviceLowMemory)
+                    put("memory_class_mb", m.memoryClassMb)
+                })
+            }
+            root.put("memory_snapshots", memArr)
 
             val json = root.toString(2)
             val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())

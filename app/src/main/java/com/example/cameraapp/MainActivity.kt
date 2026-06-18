@@ -173,6 +173,7 @@ class MainActivity : AppCompatActivity() {
 
         // Инициализация детекторов
         initDetectors()
+        PipelineLogger.logMemory(this, "app_start")
 
         refreshRemoteStatus()
 

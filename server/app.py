@@ -2,7 +2,7 @@
 """
 Focus Stacking Remote Server — Async Job Queue with YOLO refinement.
 """
-
+from pipeline_logger import ServerPipelineLogger
 import os
 import io
 import re
@@ -142,8 +142,23 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
                 threshold: int, kernel_size: int, sigma1: float,
                 sigma2: float, gain: float, filenames: list):
     """Background processing thread."""
+    plog = None
     try:
         session_dir = get_session_dir()
+
+        # --- pipeline logger ---
+        plog = ServerPipelineLogger(session_dir, job_id)
+        plog.set_meta(
+            n_files=len(image_data_list),
+            n_focus_points=len(focus_points),
+            threshold=threshold,
+            kernel_size=kernel_size,
+            sigma1=sigma1,
+            sigma2=sigma2,
+            gain=gain,
+            yolo_available=_yolo_available,
+        )
+        plog.log_memory("request_start")
 
         with jobs_lock:
             jobs[job_id]["session_dir"] = session_dir
@@ -168,30 +183,39 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
             json.dump(params, pf, indent=2)
 
         # Save input images
-        image_paths = []
-        for i, img_bytes in enumerate(image_data_list):
-            input_path = os.path.join(session_dir, f"input_{i:03d}.jpg")
-            with open(input_path, "wb") as f:
-                f.write(img_bytes)
-            image_paths.append(input_path)
-            app.logger.info(f"[Job {job_id}]   Image {i}: {filenames[i]} saved")
+        with plog.measure_stage("save_inputs"):
+            image_paths = []
+            for i, img_bytes in enumerate(image_data_list):
+                input_path = os.path.join(session_dir, f"input_{i:03d}.jpg")
+                with open(input_path, "wb") as f:
+                    f.write(img_bytes)
+                image_paths.append(input_path)
+                app.logger.info(f"[Job {job_id}]   Image {i}: {filenames[i]} saved")
 
         # Step 1: Detail masks (DoG)
         with jobs_lock:
             jobs[job_id]["step"] = "generating_masks"
 
-        masks = []
-        for i, img_path in enumerate(image_paths):
-            mask = generate_details_mask(
-                img_path, threshold, kernel_size, sigma1, sigma2, gain
-            )
-            masks.append(mask)
-            save_debug_image(session_dir, f"details_{i:03d}.png", mask, is_mask=True)
-            app.logger.info(f"[Job {job_id}]   Mask {i}: shape={mask.shape}")
+        with plog.measure_stage("generate_masks"):
+            masks = []
+            for i, img_path in enumerate(image_paths):
+                mask = generate_details_mask(
+                    img_path, threshold, kernel_size, sigma1, sigma2, gain
+                )
+                masks.append(mask)
+                save_debug_image(session_dir, f"details_{i:03d}.png", mask, is_mask=True)
+                app.logger.info(f"[Job {job_id}]   Mask {i}: shape={mask.shape}")
+
+        if masks:
+            mh, mw = masks[0].shape[:2]
+            plog.set_meta(image_size=f"{mw}x{mh}")
+        plog.log_memory("after_masks")
 
         # Step 1b: Filter duplicates
-        unique_indices = filter_duplicate_masks(masks, similarity_threshold=0.05)
+        with plog.measure_stage("filter_duplicates"):
+            unique_indices = filter_duplicate_masks(masks, similarity_threshold=0.05)
         app.logger.info(f"[Job {job_id}]   Unique masks: {unique_indices} / {len(masks)}")
+        plog.set_meta(n_unique=len(unique_indices))
 
         with open(os.path.join(session_dir, "unique_indices.json"), "w") as uf:
             json.dump({"unique_indices": unique_indices, "total": len(masks)}, uf)
@@ -199,6 +223,8 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
         if len(unique_indices) < 2:
             result_path = os.path.join(session_dir, "composite_final.jpg")
             shutil.copy2(image_paths[0], result_path)
+            plog.log_memory("complete")
+            plog.write_json()
             with jobs_lock:
                 jobs[job_id]["status"] = "done"
                 jobs[job_id]["result_path"] = result_path
@@ -218,15 +244,18 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
             jobs[job_id]["step"] = "aligning"
 
         app.logger.info(f"[Job {job_id}]   Aligning images...")
-        aligned_images, aligned_masks, homographies = align_images(
-            u_image_paths, u_masks
-        )
+        with plog.measure_stage("align_images"):
+            aligned_images, aligned_masks, homographies = align_images(
+                u_image_paths, u_masks
+            )
         app.logger.info(f"[Job {job_id}]   Aligned: {len(aligned_images)} images")
+        plog.log_memory("after_align")
 
-        for i, (aimg, amask) in enumerate(zip(aligned_images, aligned_masks)):
-            save_debug_image(session_dir, f"aligned_{i:03d}.jpg", aimg)
-            save_debug_image(session_dir, f"aligned_mask_{i:03d}.png", amask,
-                             is_mask=True)
+        with plog.measure_stage("save_aligned_debug"):
+            for i, (aimg, amask) in enumerate(zip(aligned_images, aligned_masks)):
+                save_debug_image(session_dir, f"aligned_{i:03d}.jpg", aimg)
+                save_debug_image(session_dir, f"aligned_mask_{i:03d}.png", amask,
+                                 is_mask=True)
 
         # Step 3: Focus map
         with jobs_lock:
@@ -234,7 +263,8 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
 
         app.logger.info(f"[Job {job_id}]   Building focus map...")
         fp_list = [(fp["cx"], fp["cy"]) for fp in u_focus_points]
-        focus_map = build_focus_map(aligned_masks, fp_list)
+        with plog.measure_stage("build_focus_map"):
+            focus_map = build_focus_map(aligned_masks, fp_list)
         app.logger.info(f"[Job {job_id}]   Focus map built: shape={focus_map.shape}")
 
         save_focus_map_visualization(
@@ -245,16 +275,19 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
         with jobs_lock:
             jobs[job_id]["step"] = "yolo_refinement"
 
-        focus_map = _apply_yolo_refinement(
-            job_id, session_dir, aligned_images[0], focus_map
-        )
+        with plog.measure_stage("yolo_refinement"):
+            focus_map = _apply_yolo_refinement(
+                job_id, session_dir, aligned_images[0], focus_map
+            )
+        plog.log_memory("after_yolo")
 
         # Step 4: Composite
         with jobs_lock:
             jobs[job_id]["step"] = "compositing"
 
         app.logger.info(f"[Job {job_id}]   Compositing...")
-        composite = composite_images(aligned_images, focus_map)
+        with plog.measure_stage("composite"):
+            composite = composite_images(aligned_images, focus_map)
         app.logger.info(f"[Job {job_id}]   Composite: shape={composite.shape}")
         save_debug_image(session_dir, "composite_raw.jpg", composite)
 
@@ -262,21 +295,26 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
         with jobs_lock:
             jobs[job_id]["step"] = "blending_seams"
 
-        composite = blend_seams(composite, aligned_images, focus_map)
+        with plog.measure_stage("blend_seams"):
+            composite = blend_seams(composite, aligned_images, focus_map)
 
         # Save results
-        result_path = os.path.join(session_dir, "composite_final.jpg")
-        cv2.imwrite(result_path, composite, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        app.logger.info(f"[Job {job_id}]   [DEBUG] Saved: {result_path}")
+        with plog.measure_stage("save_result"):
+            result_path = os.path.join(session_dir, "composite_final.jpg")
+            cv2.imwrite(result_path, composite, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            app.logger.info(f"[Job {job_id}]   [DEBUG] Saved: {result_path}")
 
-        save_annotated_image(
-            session_dir, composite, focus_map,
-            len(aligned_images), fp_list
-        )
+            save_annotated_image(
+                session_dir, composite, focus_map,
+                len(aligned_images), fp_list
+            )
 
         result_size = os.path.getsize(result_path)
         app.logger.info(f"[Job {job_id}]   Done! Composite size: {result_size} bytes")
         app.logger.info(f"[Job {job_id}]   [DEBUG] All intermediate files in: {session_dir}")
+
+        plog.log_memory("complete")
+        plog.write_json()
 
         with jobs_lock:
             jobs[job_id]["status"] = "done"
@@ -285,12 +323,14 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
 
     except Exception as e:
         traceback.print_exc()
+        if plog is not None:
+            plog.log_memory("error")
+            plog.write_json()
         with jobs_lock:
             jobs[job_id]["status"] = "error"
             jobs[job_id]["error"] = str(e)
             jobs[job_id]["step"] = "failed"
         app.logger.error(f"[Job {job_id}]   ERROR: {e}")
-
 
 def _apply_yolo_refinement(
     job_id: str,
