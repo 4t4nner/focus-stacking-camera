@@ -135,7 +135,69 @@ def cleanup_old_jobs():
         for jid in expired:
             jobs.pop(jid, None)
 
+def save_zone_masks_and_mapped(
+        session_dir: str,
+        composite: np.ndarray,
+        focus_map: np.ndarray,
+        n_sources: int,
+        focus_points: list,
+):
+    """
+    1) Сохраняет ч/б маску каждой зоны focus_map (zone_mask_000.png ...):
+       белое = пиксели, взятые из источника i.
+    2) Накладывает зоны разными цветами на composite -> composite_final_mapped.jpg,
+       рисует точки фокуса с номерами (жирное выделение).
+    """
+    h, w = focus_map.shape
+    colors = [
+        (255, 0, 0), (0, 255, 0), (0, 0, 255),
+        (255, 255, 0), (255, 0, 255), (0, 255, 255),
+        (128, 0, 255), (255, 128, 0), (0, 128, 255),
+        (128, 255, 0),
+    ]
 
+    # --- 1) ч/б маски зон ---
+    for i in range(n_sources):
+        zone_mask = (focus_map == i).astype(np.uint8) * 255
+        path = os.path.join(session_dir, f"zone_mask_{i:03d}.png")
+        cv2.imwrite(path, zone_mask)
+        app.logger.info(f"  [DEBUG] Saved zone mask {i}: {path}")
+
+    # --- 2) цветной оверлей зон поверх composite ---
+    mapped = composite.copy()
+    zone_overlay = np.zeros_like(composite)
+    for i in range(n_sources):
+        zone_overlay[focus_map == i] = colors[i % len(colors)]
+    cv2.addWeighted(zone_overlay, 0.35, mapped, 1.0, 0, mapped)
+
+    # жирные границы зон
+    padded = np.pad(focus_map, 1, mode='edge')
+    seam_mask = np.zeros((h, w), dtype=np.uint8)
+    for dy in range(-1, 2):
+        for dx in range(-1, 2):
+            if dy == 0 and dx == 0:
+                continue
+            shifted = padded[1 + dy:h + 1 + dy, 1 + dx:w + 1 + dx]
+            seam_mask |= (focus_map != shifted).astype(np.uint8)
+    seam_mask = cv2.dilate(
+        seam_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    )
+    mapped[seam_mask > 0] = (255, 255, 255)
+
+    # точки фокуса с номерами (жирные)
+    for i, fp in enumerate(focus_points):
+        cx = int(np.clip(fp[0], 0, w - 1))
+        cy = int(np.clip(fp[1], 0, h - 1))
+        cv2.circle(mapped, (cx, cy), 24, (0, 0, 0), -1)
+        cv2.circle(mapped, (cx, cy), 22, (255, 255, 255), 4)
+        cv2.circle(mapped, (cx, cy), 18, colors[i % len(colors)], -1)
+        cv2.putText(mapped, str(i + 1), (cx - 9, cy + 9),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2,
+                    cv2.LINE_AA)
+
+    path = os.path.join(session_dir, "composite_final_mapped.jpg")
+    cv2.imwrite(path, mapped, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    app.logger.info(f"  [DEBUG] Saved mapped composite: {path}")
 # ======================== PIPELINE WORKER ========================
 
 def process_job(job_id: str, image_data_list: list, focus_points: list,
@@ -276,8 +338,10 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
             jobs[job_id]["step"] = "yolo_refinement"
 
         with plog.measure_stage("yolo_refinement"):
+            forced_zone = getattr(build_focus_map, "last_forced_zone", None)
             focus_map = _apply_yolo_refinement(
-                job_id, session_dir, aligned_images[0], focus_map
+                job_id, session_dir, aligned_images[0], focus_map,
+                fp_list, forced_zone
             )
         plog.log_memory("after_yolo")
 
@@ -305,6 +369,10 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
             app.logger.info(f"[Job {job_id}]   [DEBUG] Saved: {result_path}")
 
             save_annotated_image(
+                session_dir, composite, focus_map,
+                len(aligned_images), fp_list
+            )
+            save_zone_masks_and_mapped(
                 session_dir, composite, focus_map,
                 len(aligned_images), fp_list
             )
@@ -613,10 +681,21 @@ def align_images(
 def build_focus_map(
         aligned_masks: list,
         focus_points: list,
-        blur_radius: int = 31
+        blur_radius: int = 31,
+        contour_dilate: int = 9,
 ) -> np.ndarray:
+    """
+    Базовое попиксельное назначение по argmax DoG-резкости + принудительная
+    привязка контура каждой точки фокуса к её собственному источнику.
+
+    Для точки i: в маске источника i ищется связная область (контур),
+    содержащая точку. Вся эта область жёстко назначается источнику i
+    (имеет приоритет над argmax).
+    """
     h, w = aligned_masks[0].shape[:2]
     n = len(aligned_masks)
+
+    # --- базовый argmax по сглаженным маскам ---
     float_masks = []
     for mask in aligned_masks:
         fm = mask.astype(np.float32) / 255.0
@@ -628,6 +707,8 @@ def build_focus_map(
     assignment = np.argmax(stacked, axis=0).astype(np.int32)
     max_vals = np.max(stacked, axis=0)
     unfocused = max_vals < 0.001
+
+    # --- заполнение нерезких областей по seed-точкам (как было) ---
     if np.any(unfocused) and focus_points:
         seeds = np.zeros((h, w), dtype=np.int32)
         for i, fp in enumerate(focus_points):
@@ -642,12 +723,81 @@ def build_focus_map(
             filled[still_zero] = dilated[still_zero]
             if not np.any(filled == 0):
                 break
-        for y in range(h):
-            for x in range(w):
-                if unfocused[y, x] and filled[y, x] > 0:
-                    assignment[y, x] = filled[y, x] - 1
+        fill_mask = unfocused & (filled > 0)
+        assignment[fill_mask] = filled[fill_mask].astype(np.int32) - 1
+
+    # --- ПРИОРИТЕТНАЯ привязка контура точки к её источнику ---
+    # forced_zone[y,x] = i+1, если пиксель жёстко закреплён за источником i
+    forced_zone = np.zeros((h, w), dtype=np.int32)
+
+    dilate_kernel = None
+    if contour_dilate > 1:
+        dilate_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (contour_dilate, contour_dilate)
+        )
+
+    for i, fp in enumerate(focus_points):
+        if i >= n:
+            break
+        cx = int(np.clip(fp[0], 0, w - 1))
+        cy = int(np.clip(fp[1], 0, h - 1))
+
+        src_mask = (aligned_masks[i] > 127).astype(np.uint8)
+        if dilate_kernel is not None:
+            # «жирнее»: подключаем близкие штрихи к одному контуру
+            src_mask = cv2.dilate(src_mask, dilate_kernel)
+
+        contour_region = _extract_contour_at_point(src_mask, cx, cy)
+        if contour_region is None:
+            continue
+
+        forced_zone[contour_region > 0] = i + 1
+
+    forced = forced_zone > 0
+    assignment[forced] = forced_zone[forced] - 1
+
+    # сохраним forced-карту для последующего объединения с YOLO
+    build_focus_map.last_forced_zone = forced_zone  # type: ignore[attr-defined]
+
     return assignment
 
+
+def _extract_contour_at_point(
+        binary_mask: np.ndarray, cx: int, cy: int
+) -> "np.ndarray | None":
+    """
+    Возвращает бинарную область связного компонента (контура) бинарной маски,
+    содержащего точку (cx, cy). Если точка не лежит на резкой области —
+    берётся ближайший компонент в небольшом радиусе. Иначе None.
+    """
+    h, w = binary_mask.shape[:2]
+
+    # связные компоненты резкости
+    num, labels = cv2.connectedComponents(binary_mask, connectivity=8)
+    if num <= 1:
+        return None
+
+    lbl = labels[cy, cx]
+    if lbl == 0:
+        # точка попала в «дырку»/фон — ищем ближайший компонент в радиусе
+        r = max(5, min(h, w) // 50)
+        y0, y1 = max(0, cy - r), min(h, cy + r + 1)
+        x0, x1 = max(0, cx - r), min(w, cx + r + 1)
+        patch = labels[y0:y1, x0:x1]
+        nz = patch[patch > 0]
+        if nz.size == 0:
+            return None
+        # самый частый сосед
+        lbl = int(np.bincount(nz).argmax())
+
+    region = (labels == lbl).astype(np.uint8) * 255
+
+    # заполняем внутренние дыры контура, чтобы взять цельную область
+    filled = region.copy()
+    cnts, _ = cv2.findContours(region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(filled, cnts, -1, 255, thickness=cv2.FILLED)
+
+    return filled
 
 # ======================== COMPOSITE ========================
 

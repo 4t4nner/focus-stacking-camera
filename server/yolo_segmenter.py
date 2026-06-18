@@ -157,22 +157,31 @@ def segment_objects(
     return objects
 
 
+
 def refine_focus_map_with_objects(
-    focus_map: np.ndarray,
-    objects: List[SegmentedObject],
-    session_dir: str = None,
+        focus_map: np.ndarray,
+        objects: List[SegmentedObject],
+        focus_points: Optional[List[Tuple[int, int]]] = None,
+        forced_zone: Optional[np.ndarray] = None,
+        session_dir: str = None,
 ) -> np.ndarray:
     """
-    Refine focus_map so that each detected object belongs entirely
-    to one focus zone (the zone that covers the majority of the object).
+    Refine focus_map so that each detected object belongs entirely to one zone.
+
+    Правило выбора зоны объекта:
+      1) если внутри объекта лежит точка фокуса i -> объект целиком отдаётся
+         источнику i (объект РАСШИРЯЕТ область точки);
+         если точек несколько — берётся та, чья зона уже покрывает больше
+         пикселей объекта;
+      2) иначе -> зона большинства пикселей (прежнее поведение).
 
     Args:
-        focus_map: (H, W) int32 array, pixel -> source index
-        objects: list of SegmentedObject from YOLO
-        session_dir: optional, for debug output
-
-    Returns:
-        Refined focus_map (same shape)
+        focus_map: (H, W) int32, пиксель -> индекс источника
+        objects: список SegmentedObject
+        focus_points: список (cx, cy) в координатах focus_map; индекс = источник
+        forced_zone: (H, W) int32, forced_zone[y,x] = i+1 для жёстко
+                     закреплённых пикселей (из build_focus_map); может быть None
+        session_dir: для отладочных изображений
     """
     if not objects:
         return focus_map
@@ -181,9 +190,10 @@ def refine_focus_map_with_objects(
     refined = focus_map.copy()
     n_sources = int(focus_map.max()) + 1
 
+    focus_points = focus_points or []
     changes_total = 0
 
-    for i, obj in enumerate(objects):
+    for idx, obj in enumerate(objects):
         mask = obj.mask
         if mask.shape[0] != h or mask.shape[1] != w:
             mask = cv2.resize(
@@ -193,31 +203,46 @@ def refine_focus_map_with_objects(
 
         obj_pixels = np.where(mask)
         n_pixels = len(obj_pixels[0])
-
         if n_pixels == 0:
             continue
 
-        # Count how many pixels of this object are in each focus zone
+        # --- какие точки фокуса попадают внутрь объекта? ---
+        inside = []
+        for pi, (px, py) in enumerate(focus_points):
+            px = int(np.clip(px, 0, w - 1))
+            py = int(np.clip(py, 0, h - 1))
+            if pi < n_sources and mask[py, px]:
+                inside.append(pi)
+
         zone_values = refined[obj_pixels]
         zone_counts = np.bincount(zone_values, minlength=n_sources)
-        majority_zone = int(np.argmax(zone_counts))
 
-        # How many pixels need to change
-        need_change = n_pixels - zone_counts[majority_zone]
+        if inside:
+            # выбираем источник точки, который уже покрывает больше пикселей объекта
+            target_zone = max(inside, key=lambda s: zone_counts[s])
+            reason = f"focus-point {target_zone}"
+        else:
+            target_zone = int(np.argmax(zone_counts))
+            reason = "majority"
 
+        need_change = n_pixels - zone_counts[target_zone]
         if need_change > 0:
-            refined[obj_pixels] = majority_zone
+            refined[obj_pixels] = target_zone
             changes_total += need_change
             logger.info(
-                f"  Object {i} '{obj.class_name}' ({obj.confidence:.2f}): "
-                f"{n_pixels} px -> zone {majority_zone} "
-                f"(changed {need_change} px)"
+                f"  Object {idx} '{obj.class_name}' ({obj.confidence:.2f}): "
+                f"{n_pixels} px -> zone {target_zone} ({reason}, "
+                f"changed {need_change} px)"
             )
+
+    # --- повторно навязываем forced_zone: контуры точек неприкосновенны ---
+    if forced_zone is not None:
+        forced = forced_zone > 0
+        refined[forced] = forced_zone[forced] - 1
 
     logger.info(f"  Focus map refinement: {changes_total} pixels changed "
                 f"across {len(objects)} objects")
 
-    # Save debug visualization if session_dir given
     if session_dir:
         _save_refinement_debug(focus_map, refined, objects, n_sources, session_dir)
 
