@@ -95,22 +95,23 @@ object PipelineLogger {
             memoryClassMb = am.memoryClass
         )
 
+        // Только копим в памяти — в файл всё запишется один раз в writeJson()
         memorySnapshots.add(log)
+
         Log.d(
             TAG,
-            "MEMORY [$tag]: PSS=%.1fMB (dalvik=%.1f native=%.1f), " .format(totalPss, dalvikPss, nativePss) +
+            "MEMORY [$tag]: PSS=%.1fMB (dalvik=%.1f native=%.1f), ".format(totalPss, dalvikPss, nativePss) +
                     "javaHeap=%.1f/%.1fMB, device avail=%.0f/%.0fMB%s"
                         .format(javaUsed, javaMax, devAvail, devTotal,
                             if (devInfo.lowMemory) " [LOW]" else "")
         )
+
         return log
     }
 
     @Synchronized
     fun startSession() {
-        frames.clear()
-        stages.clear()
-        memorySnapshots.clear()
+//        memorySnapshots.clear()
         sessionStart = System.currentTimeMillis()
         Log.d(TAG, "=== Session started ===")
     }
@@ -201,6 +202,10 @@ object PipelineLogger {
 
             Log.d(TAG, "JSON log written: $location")
             Log.d(TAG, json)
+            frames.clear()
+            stages.clear()
+            memorySnapshots.clear()
+
             location
         } catch (e: Exception) {
             Log.e(TAG, "Failed to write JSON log", e)

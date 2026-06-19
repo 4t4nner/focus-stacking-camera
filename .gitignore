@@ -1,4 +1,6 @@
 theory/
+!theory/compilation.typ
+
 context.*
 *.excalidraw
 tmp.*

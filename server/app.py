@@ -295,12 +295,25 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
 
         u_image_paths = [image_paths[i] for i in unique_indices]
         u_masks = [masks[i] for i in unique_indices]
-        u_focus_points = [
-            focus_points[i] if i < len(focus_points)
-            else {"cx": masks[i].shape[1] // 2, "cy": masks[i].shape[0] // 2}
-            for i in unique_indices
-        ]
+        # масштаб нормированных координат: точки приходят либо как {nx,ny} в [0..1],
+        # либо как legacy {cx,cy} в координатах кадра анализа (НЕ полноразмерных!).
+        def _resolve_point(fp, w, h):
+            if fp is None:
+                return {"cx": w // 2, "cy": h // 2}
+            if "nx" in fp and "ny" in fp:
+                return {
+                    "cx": int(round(float(fp["nx"]) * (w - 1))),
+                    "cy": int(round(float(fp["ny"]) * (h - 1))),
+                }
+            # legacy: считаем, что cx/cy уже в пикселях этого изображения
+            return {"cx": int(fp.get("cx", w // 2)),
+                    "cy": int(fp.get("cy", h // 2))}
 
+        u_focus_points = []
+        for i in unique_indices:
+            mh_i, mw_i = masks[i].shape[:2]
+            fp = focus_points[i] if i < len(focus_points) else None
+            u_focus_points.append(_resolve_point(fp, mw_i, mh_i))
         # Step 2: Align
         with jobs_lock:
             jobs[job_id]["step"] = "aligning"
@@ -598,19 +611,46 @@ def generate_details_mask(
 def filter_duplicate_masks(
         masks: list, similarity_threshold: float = 0.05
 ) -> list:
+    """
+    Дубликатом считается кадр, чья DoG-маска почти совпадает с уже принятой.
+    Метрика: доля расходящихся пикселей среди ОБЪЕДИНЕНИЯ активных пикселей
+    (а не среди всего кадра — иначе разреженные маски всегда «похожи»).
+
+    similarity_threshold = 0.05 означает: если различается <=5% активной
+    площади — это дубликат.
+    """
+    if not masks:
+        return []
+
     unique = [0]
     for i in range(1, len(masks)):
         is_dup = False
+        m1 = (masks[i] > 127).astype(np.uint8)
         for j in unique:
-            m1 = (masks[i] > 127).astype(np.uint8)
             m2 = (masks[j] > 127).astype(np.uint8)
             if m1.shape != m2.shape:
-                m2 = cv2.resize(m2, (m1.shape[1], m1.shape[0]))
-            xor = cv2.bitwise_xor(m1, m2)
-            diff_ratio = np.count_nonzero(xor) / xor.size
+                m2 = cv2.resize(m2, (m1.shape[1], m1.shape[0]),
+                                interpolation=cv2.INTER_NEAREST)
+                m2 = (m2 > 0).astype(np.uint8)
+
+            inter = np.count_nonzero(cv2.bitwise_and(m1, m2))
+            union = np.count_nonzero(cv2.bitwise_or(m1, m2))
+
+            if union == 0:
+                # обе маски пустые -> считаем одинаковыми
+                diff_ratio = 0.0
+            else:
+                diff_ratio = 1.0 - (inter / union)  # 0 = идентичны, 1 = непересекаются
+
+            app.logger.info(
+                f"  [DUP] mask {i} vs {j}: IoU={inter/union if union else 1:.3f}, "
+                f"diff={diff_ratio:.3f}"
+            )
+
             if diff_ratio <= similarity_threshold:
                 is_dup = True
                 break
+
         if not is_dup:
             unique.append(i)
     return unique

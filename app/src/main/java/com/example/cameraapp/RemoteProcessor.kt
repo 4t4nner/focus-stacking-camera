@@ -85,14 +85,15 @@ object RemoteProcessor {
         config: RemoteConfig,
         imagePaths: List<String>,
         focusPoints: List<Pair<Float, Float>>,
+        analysisWidth: Int,      // ДОБАВЛЕНО
+        analysisHeight: Int,     // ДОБАВЛЕНО
         progressCallback: ProgressCallback? = null
     ): Bitmap? {
         if (!config.enabled) return null
-
         try {
-            // ========== STEP 1: Submit job ==========
             progressCallback?.onProgress("Uploading ${imagePaths.size} images...")
-            val jobId = submitJob(config, imagePaths, focusPoints)
+            val jobId = submitJob(config, imagePaths, focusPoints,
+                analysisWidth, analysisHeight)
 
             if (jobId == null) {
                 Log.e(TAG, "Failed to submit job")
@@ -134,7 +135,9 @@ object RemoteProcessor {
     private fun submitJob(
         config: RemoteConfig,
         imagePaths: List<String>,
-        focusPoints: List<Pair<Float, Float>>
+        focusPoints: List<Pair<Float, Float>>,
+        analysisWidth: Int,
+        analysisHeight: Int
     ): String? {
         val boundary = "----FocusStack${System.currentTimeMillis()}"
         val url = URL("http://${config.serverHost}:${config.serverPort}/api/focus-stack")
@@ -174,8 +177,13 @@ object RemoteProcessor {
                 }
 
                 // Focus points
+                // Focus points — отправляем НОРМИРОВАННЫЕ координаты [0..1]
+                val aw = if (analysisWidth > 0) analysisWidth.toFloat() else 1f
+                val ah = if (analysisHeight > 0) analysisHeight.toFloat() else 1f
                 val fpJson = focusPoints.joinToString(",", "[", "]") { (cx, cy) ->
-                    """{"cx":${cx.toInt()},"cy":${cy.toInt()}}"""
+                    val nx = (cx / aw).coerceIn(0f, 1f)
+                    val ny = (cy / ah).coerceIn(0f, 1f)
+                    """{"nx":$nx,"ny":$ny}"""
                 }
                 writer.append("--$boundary\r\n")
                 writer.append("Content-Disposition: form-data; name=\"focus_points\"\r\n")
