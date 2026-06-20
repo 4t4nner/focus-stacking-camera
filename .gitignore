@@ -48,6 +48,8 @@ app/src/main/assets/*.onnx
 input*.txt
 context*.md
 
+server/scenes
+server/*.csv
 server/*.pt
 server/*.pyc
 
