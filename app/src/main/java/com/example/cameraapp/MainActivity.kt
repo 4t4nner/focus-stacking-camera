@@ -788,7 +788,9 @@ class MainActivity : AppCompatActivity() {
             }
 
             compositeBitmap = RemoteProcessor.processRemotely(
-                config, imagePaths, focusPoints, progressCallback
+                config, imagePaths, focusPoints,
+                lastAnalysisWidth, lastAnalysisHeight,   // ДОБАВЛЕНО
+                progressCallback
             )
 
             if (compositeBitmap != null) {

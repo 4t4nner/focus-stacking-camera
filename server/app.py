@@ -314,6 +314,25 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
             mh_i, mw_i = masks[i].shape[:2]
             fp = focus_points[i] if i < len(focus_points) else None
             u_focus_points.append(_resolve_point(fp, mw_i, mh_i))
+        # масштаб нормированных координат: точки приходят либо как {nx,ny} в [0..1],
+        # либо как legacy {cx,cy} в координатах кадра анализа (НЕ полноразмерных!).
+        def _resolve_point(fp, w, h):
+            if fp is None:
+                return {"cx": w // 2, "cy": h // 2}
+            if "nx" in fp and "ny" in fp:
+                return {
+                    "cx": int(round(float(fp["nx"]) * (w - 1))),
+                    "cy": int(round(float(fp["ny"]) * (h - 1))),
+                }
+            # legacy: считаем, что cx/cy уже в пикселях этого изображения
+            return {"cx": int(fp.get("cx", w // 2)),
+                    "cy": int(fp.get("cy", h // 2))}
+
+        u_focus_points = []
+        for i in unique_indices:
+            mh_i, mw_i = masks[i].shape[:2]
+            fp = focus_points[i] if i < len(focus_points) else None
+            u_focus_points.append(_resolve_point(fp, mw_i, mh_i))
         # Step 2: Align
         with jobs_lock:
             jobs[job_id]["step"] = "aligning"
