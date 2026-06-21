@@ -89,11 +89,10 @@ object ImageAligner {
 
                 // Match features
                 val homography = findHomography(
-                // Сопоставление признаков
+                    refDescriptors, refKeypoints,
                     srcDescriptors, srcKeypoints,
                     scaleFactor
                 )
-
                 if (homography != null) {
                     // Warp source image to reference coordinate space
                     val srcColor = Mat()

@@ -305,26 +305,18 @@ class MainActivity : AppCompatActivity() {
             captureIB.alpha = 1.0f
         }
     }
-
-    /**
-     * Обработка тапа в ручном режиме: добавляем точку, запускаем AF/AE
-     * на ней, после сходимости считываем параметры и сохраняем в manualSettings.
-     */
     private fun handleManualTap(cx: Float, cy: Float) {
         if (!isManualMode || isCapturing) return
 
-        // Защита от параллельных замеров
         if (!isMeteringForTap.compareAndSet(false, true)) {
             Toast.makeText(this, "Focusing… wait", Toast.LENGTH_SHORT).show()
             return
         }
 
-        // Индекс новой точки = текущее количество ручных точек
         val pointIndex = overlayView.manualPointCount()
         overlayView.addManualPoint(cx, cy)
         updateCaptureButtonState()
 
-        // Предварительная запись настроек (ещё не настроена)
         val settings = ManualFrameSettings(
             detectionIndex = pointIndex,
             label = "P${pointIndex + 1}",
@@ -334,64 +326,123 @@ class MainActivity : AppCompatActivity() {
         )
         manualSettings[pointIndex] = settings
 
-        // Преобразование координат кадра анализа -> координаты previewView.
+        // ===== AF-регион в координатах активного сенсора =====
+        val cam2 = camera?.cameraControl?.let { Camera2CameraControl.from(it) }
+        if (cam2 == null) {
+            isMeteringForTap.set(false)
+            return
+        }
+
+        // Размер активного массива сенсора
+        val sensorRect: Rect? = try {
+            val cm = getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+            // id 0 — задняя камера (как в логе CameraId-0)
+            cm.getCameraCharacteristics("0")
+                .get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+        } catch (e: Exception) {
+            null
+        }
+
+        // Маппинг точки кадра анализа -> координаты сенсора.
+        // Анализ aw x ah, поворот сенсора 90°, кадр квадратный (center-crop).
         val aw = lastAnalysisWidth.takeIf { it > 0 } ?: 1
         val ah = lastAnalysisHeight.takeIf { it > 0 } ?: 1
-        val fx = (cx / aw) * previewView.width
-        val fy = (cy / ah) * previewView.height
 
-        Log.d(TAG, "TAP idx=$pointIndex cx=$cx cy=$cy aw=$aw ah=$ah -> fx=$fx fy=$fy preview=${previewView.width}x${previewView.height}")
+        val afRegion: android.hardware.camera2.params.MeteringRectangle? = sensorRect?.let { sr ->
+            // нормализованные координаты тапа [0..1] в кадре анализа
+            val nx = (cx / aw).coerceIn(0f, 1f)
+            val ny = (cy / ah).coerceIn(0f, 1f)
+            // Сенсор повёрнут на 90° относительно превью (rotationDegrees=90):
+            // x_sensor соответствует ny, y_sensor соответствует (1 - nx).
+            val sx = (ny * sr.width()).toInt().coerceIn(0, sr.width() - 1)
+            val sy = ((1f - nx) * sr.height()).toInt().coerceIn(0, sr.height() - 1)
+            val half = (minOf(sr.width(), sr.height()) * 0.075f).toInt() // ~7.5% области
+            val left = (sx - half).coerceIn(0, sr.width() - 1)
+            val top = (sy - half).coerceIn(0, sr.height() - 1)
+            val right = (sx + half).coerceIn(left + 1, sr.width())
+            val bottom = (sy + half).coerceIn(top + 1, sr.height())
+            android.hardware.camera2.params.MeteringRectangle(
+                left, top, right - left, bottom - top,
+                android.hardware.camera2.params.MeteringRectangle.METERING_WEIGHT_MAX
+            )
+        }
+
+        Log.d(TAG, "TAP idx=$pointIndex cx=$cx cy=$cy aw=$aw ah=$ah afRegion=$afRegion sensor=$sensorRect")
 
         try {
-            val meteringPoint = previewView.meteringPointFactory.createPoint(fx, fy)
-            val action = FocusMeteringAction.Builder(
-                meteringPoint,
-                FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
-            )
-                .setAutoCancelDuration(5, java.util.concurrent.TimeUnit.SECONDS)
-                .build()
-
-            val future = camera?.cameraControl?.startFocusAndMetering(action)
-            if (future == null) {
-                isMeteringForTap.set(false)
-                return
+            // 1) Ставим AF в AUTO + регион + START-триггер напрямую.
+            val startBuilder = CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AF_MODE,
+                    CameraMetadata.CONTROL_AF_MODE_AUTO
+                )
+                .setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AF_TRIGGER,
+                    CameraMetadata.CONTROL_AF_TRIGGER_START
+                )
+            afRegion?.let {
+                startBuilder.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AF_REGIONS, arrayOf(it)
+                )
             }
+            cam2.setCaptureRequestOptions(startBuilder.build())
 
-            future.addListener({
-                // AF/AE future завершился, НО линза/сенсор и preview-метаданные обновляются
-                // с задержкой в несколько кадров. Даём время доехать и обновить
-                // lastFocusDistance/lastIso/lastExposureTimeNs, иначе для разных точек
-                // считаются устаревшие (одинаковые) значения.
-                overlayView.postDelayed({
-                    val focus = lastFocusDistance
-                    val exp = lastExposureTimeNs
-                    val iso = lastIso
+            // 2) Поллим preview-callback до сходимости AF.
+            val deadline = SystemClock.elapsedRealtime() + 4000
+            var sawScan = false
+            val checker = object : Runnable {
+                override fun run() {
+                    val af = lastAfState
+                    if (af == CaptureResult.CONTROL_AF_STATE_ACTIVE_SCAN ||
+                        af == CaptureResult.CONTROL_AF_STATE_PASSIVE_SCAN
+                    ) sawScan = true
 
-                    settings.focusDistanceDiopters = focus
-                    settings.exposureTimeNs = exp
-                    settings.iso = iso
-                    settings.configured = (focus != null || exp != null || iso != null)
+                    val locked = af == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED ||
+                            af == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED
+                    val timedOut = SystemClock.elapsedRealtime() > deadline
 
-                    Log.d(TAG, "POINT idx=$pointIndex configured focus=$focus iso=$iso exp=$exp")
+                    if ((locked && sawScan) || timedOut) {
+                        val focus = lastFocusDistance
+                        val exp = lastExposureTimeNs
+                        val iso = lastIso
 
-                    overlayView.setManualPointConfigured(pointIndex, settings.configured)
-                    val fm = focus?.let { if (it > 0f) "%.2fm".format(1f / it) else "∞" } ?: "?"
-                    Toast.makeText(
-                        this,
-                        "Point ${pointIndex + 1}: focus=$fm iso=${iso ?: "?"}",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                        settings.focusDistanceDiopters = focus
+                        settings.exposureTimeNs = exp
+                        settings.iso = iso
+                        settings.configured = (focus != null || exp != null || iso != null)
 
-                    isMeteringForTap.set(false)
-                }, 400)  // 400 мс на доезд линзы + обновление метаданных preview-потока
+                        Log.d(TAG, "POINT idx=$pointIndex focus=$focus iso=$iso exp=$exp " +
+                                "afState=$af sawScan=$sawScan timedOut=$timedOut")
 
-            }, ContextCompat.getMainExecutor(this))
+                        // 3) Снимаем START-триггер (IDLE), фокус остаётся залоченным в AUTO.
+                        cam2.setCaptureRequestOptions(
+                            CaptureRequestOptions.Builder()
+                                .setCaptureRequestOption(
+                                    CaptureRequest.CONTROL_AF_TRIGGER,
+                                    CameraMetadata.CONTROL_AF_TRIGGER_IDLE
+                                ).build()
+                        )
+
+                        overlayView.setManualPointConfigured(pointIndex, settings.configured)
+                        val fm = focus?.let { if (it > 0f) "%.2fm".format(1f / it) else "∞" } ?: "?"
+                        Toast.makeText(this@MainActivity,
+                            "Point ${pointIndex + 1}: focus=$fm iso=${iso ?: "?"}",
+                            Toast.LENGTH_SHORT).show()
+
+                        isMeteringForTap.set(false)
+                    } else {
+                        overlayView.postDelayed(this, 40)
+                    }
+                }
+            }
+            overlayView.postDelayed(checker, 40)
 
         } catch (e: Exception) {
-            Log.e(TAG, "Manual tap metering failed", e)
+            Log.e(TAG, "Manual tap AF failed", e)
             isMeteringForTap.set(false)
         }
     }
+
     /**
      * Собирает список объектов для съёмки из ручных точек.
      * Порядок = порядок добавления (индекс точки), что совпадает
@@ -434,6 +485,7 @@ class MainActivity : AppCompatActivity() {
                         // Обновляем "живые" значения параметров на каждом preview-кадре.
                         result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let {
                             lastFocusDistance = it
+                            Log.d(TAG, "preview LENS_FOCUS_DISTANCE=$it afState=${result.get(CaptureResult.CONTROL_AF_STATE)}")
                         }
                         result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let {
                             lastExposureTimeNs = it
@@ -443,11 +495,6 @@ class MainActivity : AppCompatActivity() {
                         }
                         lastAfState = result.get(CaptureResult.CONTROL_AF_STATE)
                         lastAeState = result.get(CaptureResult.CONTROL_AE_STATE)
-
-                        result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let {
-                            lastFocusDistance = it
-                            Log.d(TAG, "preview LENS_FOCUS_DISTANCE=$it afState=${result.get(CaptureResult.CONTROL_AF_STATE)}")
-                        }
                     }
                 }
             )
