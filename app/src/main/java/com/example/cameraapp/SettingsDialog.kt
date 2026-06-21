@@ -38,19 +38,19 @@ class SettingsDialog(
         val statusTV = view.findViewById<TextView>(R.id.statusTV)
         val testBtn = view.findViewById<Button>(R.id.testConnectionBtn)
 
-        // Load detector value ← NEW
+        // Загрузка значения детектора
         when (AppSettings.getDetector(context)) {
             AppSettings.DETECTOR_YOLO -> detectorYoloRB.isChecked = true
             else -> detectorMlKitRB.isChecked = true
         }
 
-        // Load capture mode
+        // Загрузка режима съёмки
         when (AppSettings.getCaptureMode(context)) {
             AppSettings.MODE_MANUAL -> captureModeManualRB.isChecked = true
             else -> captureModeAutoRB.isChecked = true
         }
 
-        // Load current values
+        // Загрузка текущих значений
         remoteSwitch.isChecked = AppSettings.isRemoteEnabled(context)
         hostET.setText(AppSettings.getRemoteHost(context))
         portET.setText(AppSettings.getRemotePort(context).toString())
@@ -107,12 +107,12 @@ class SettingsDialog(
             .setPositiveButton("Save") { _, _ ->
                 AppSettings.setCaptureOnly(context, captureOnlySwitch.isChecked)
 
-                // Save detector
+                // Сохранение детектора
                 val detector = if (detectorYoloRB.isChecked)
                     AppSettings.DETECTOR_YOLO else AppSettings.DETECTOR_MLKIT
                 AppSettings.setDetector(context, detector)
 
-                // Save capture mode
+                // Сохранение режима съёмки
                 val mode = if (captureModeManualRB.isChecked)
                     AppSettings.MODE_MANUAL else AppSettings.MODE_AUTO
                 AppSettings.setCaptureMode(context, mode)

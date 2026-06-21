@@ -43,7 +43,6 @@ class YoloDetector(private val context: Context) {
         if (initialized) return true
         if (!OpenCVLoader.initLocal()) return false
 
-        // YOLOv8n — поддерживается OpenCV DNN (без attention блоков)
         val modelFile = copyAssetToFile("yolov10m.onnx") ?: return false
         net = Dnn.readNetFromONNX(modelFile.absolutePath)
         if (net.empty()) return false

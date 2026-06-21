@@ -10,8 +10,8 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Composites multiple aligned images into one all-in-focus image using the focus map.
- * Uses OpenCV seamlessClone for seam blending and Navier-Stokes inpainting for artifacts.
+ * Объединяет несколько выровненных изображений в одно полностью сфокусированное изображение с использованием карты фокуса.
+ * Использует OpenCV seamlessClone для смешивания швов и инпейнтинг Навье-Стокса для устранения артефактов.
  */
 object FocusStackCompositor {
 
@@ -19,18 +19,18 @@ object FocusStackCompositor {
 
     data class CompositeResult(
         val bitmap: Bitmap,
-        val seamMask: Bitmap?,  // debug: shows seam boundaries
-        val focusMapVis: Bitmap?  // debug: color-coded source assignment
+        val seamMask: Bitmap?,  // отладка: показывает границы швов
+        val focusMapVis: Bitmap?  // отладка: цветовое обозначение назначения источников
     )
 
     /**
-     * Compose final all-in-focus image.
+     * Формирует итоговое полностью сфокусированное изображение.
      *
-     * @param alignedImages list of aligned bitmaps (same coordinate space)
-     * @param focusMap per-pixel source assignment
-     * @param seamBlendRadius radius for Poisson/feather blending at seam boundaries
-     * @param inpaintRadius radius for inpainting artifact zones
-     * @return CompositeResult or null
+     * @param alignedImages список выровненных bitmap-изображений (в одном координатном пространстве)
+     * @param focusMap попиксельное назначение источника
+     * @param seamBlendRadius радиус для пуассоновского/мягкого смешивания на границах швов
+     * @param inpaintRadius радиус для инпейнтинга зон с артефактами
+     * @return CompositeResult или null
      */
     fun compose(
         alignedImages: List<Bitmap>,
@@ -48,14 +48,14 @@ object FocusStackCompositor {
 
             Log.d(TAG, "Compositing ${w}x${h} from $n sources")
 
-            // Convert all images to Mat (RGBA)
+            // Преобразуем все изображения в Mat (RGBA)
             val srcMats = alignedImages.map { bmp ->
                 val mat = Mat()
                 Utils.bitmapToMat(bmp, mat)
                 mat
             }
 
-            // ========== Step 1: Direct pixel composition from focus map ==========
+            // ========== Шаг 1: Прямая попиксельная сборка по карте фокуса ==========
             val composite = Mat(h, w, CvType.CV_8UC4)
             val assignData = IntArray(1)
 
@@ -70,26 +70,26 @@ object FocusStackCompositor {
 
             Log.d(TAG, "Direct composition done")
 
-            // ========== Step 2: Find seam boundaries ==========
+            // ========== Шаг 2: Поиск границ швов ==========
             val seamMask = findSeamBoundaries(focusMap.assignment, seamBlendRadius)
             val seamCount = Core.countNonZero(seamMask)
             Log.d(TAG, "Seam pixels: $seamCount")
 
-            // ========== Step 3: Feather blend at seams ==========
+            // ========== Шаг 3: Мягкое смешивание на швах ==========
             if (seamCount > 0) {
                 featherBlendAtSeams(composite, srcMats, focusMap, seamMask, seamBlendRadius)
                 Log.d(TAG, "Feather blend done")
             }
 
-            // ========== Step 4: Inpainting for remaining artifacts ==========
-            // Detect artifacts: pixels where aligned images differ significantly
-            // (indicates motion/misalignment that homography couldn't fix)
+            // ========== Шаг 4: Инпейнтинг оставшихся артефактов ==========
+            // Обнаружение артефактов: пиксели, где выровненные изображения значительно различаются
+            // (указывает на движение/смещение, которое гомография не смогла исправить)
             val artifactMask = detectArtifacts(srcMats, focusMap, composite)
             val artifactCount = Core.countNonZero(artifactMask)
             Log.d(TAG, "Artifact pixels: $artifactCount")
 
             if (artifactCount > 0) {
-                // Use OpenCV Navier-Stokes inpainting
+                // Используем инпейнтинг Навье-Стокса из OpenCV
                 val compositeBgr = Mat()
                 Imgproc.cvtColor(composite, compositeBgr, Imgproc.COLOR_RGBA2BGR)
 
@@ -99,7 +99,7 @@ object FocusStackCompositor {
                 val inpaintedRgba = Mat()
                 Imgproc.cvtColor(inpainted, inpaintedRgba, Imgproc.COLOR_BGR2RGBA)
 
-                // Copy inpainted pixels back only where artifacts were
+                // Копируем восстановленные пиксели обратно только там, где были артефакты
                 inpaintedRgba.copyTo(composite, artifactMask)
 
                 compositeBgr.release()
@@ -110,16 +110,16 @@ object FocusStackCompositor {
 
             artifactMask.release()
 
-            // ========== Convert results to Bitmaps ==========
+            // ========== Преобразуем результаты в Bitmap ==========
             val resultBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             Utils.matToBitmap(composite, resultBitmap)
             composite.release()
 
-            // Debug: seam visualization
+            // Отладка: визуализация швов
             val seamBitmap = createSeamVisualization(seamMask, w, h)
             seamMask.release()
 
-            // Debug: focus map visualization
+            // Отладка: визуализация карты фокуса
             val focusVis = createFocusMapVisualization(focusMap, w, h, n)
 
             srcMats.forEach { it.release() }
@@ -134,7 +134,7 @@ object FocusStackCompositor {
     }
 
     /**
-     * Save composite result to file.
+     * Сохраняет итоговый результат в файл.
      */
     fun saveResult(bitmap: Bitmap, outputPath: String, quality: Int = 95): Boolean {
         return try {
@@ -149,7 +149,7 @@ object FocusStackCompositor {
     }
 
     /**
-     * Find pixels at boundaries between different source assignments.
+     * Находит пиксели на границах между разными назначениями источников.
      */
     private fun findSeamBoundaries(assignment: Mat, radius: Int): Mat {
         val h = assignment.rows()
@@ -181,7 +181,7 @@ object FocusStackCompositor {
             }
         }
 
-        // Dilate to create blend zone
+        // Расширяем (dilate), чтобы создать зону смешивания
         if (radius > 1) {
             val kernel = Imgproc.getStructuringElement(
                 Imgproc.MORPH_ELLIPSE,
@@ -195,8 +195,8 @@ object FocusStackCompositor {
     }
 
     /**
-     * Feather-blend pixels in the seam zone using weighted average
-     * based on distance from each source's focused region.
+     * Выполняет мягкое смешивание пикселей в зоне шва с использованием взвешенного среднего
+     * на основе расстояния от сфокусированной области каждого источника.
      */
     private fun featherBlendAtSeams(
         composite: Mat,
@@ -209,8 +209,8 @@ object FocusStackCompositor {
         val w = composite.cols()
         val n = srcMats.size
 
-        // For each source, create a binary mask of its assigned region
-        // then compute distance transform → weight map
+        // Для каждого источника создаём бинарную маску его назначенной области,
+        // затем вычисляем преобразование расстояний → карту весов
         val weightMaps = mutableListOf<Mat>()
 
         for (i in 0 until n) {
@@ -225,25 +225,25 @@ object FocusStackCompositor {
                 }
             }
 
-            // Distance transform: pixels inside the region get high weight,
-            // pixels near the boundary get low weight
+            // Преобразование расстояний: пиксели внутри области получают высокий вес,
+            // пиксели у границы получают низкий вес
             val dist = Mat()
             Imgproc.distanceTransform(sourceMask, dist, Imgproc.DIST_L2, 3)
             sourceMask.release()
 
-            // Normalize distances to 0-1 range, clamp at blendRadius
+            // Нормализуем расстояния в диапазон 0-1, ограничиваем по blendRadius
             Core.min(dist, Scalar(blendRadius.toDouble()), dist)
             Core.divide(dist, Scalar(blendRadius.toDouble()), dist)
 
             weightMaps.add(dist)
         }
 
-        // Normalize weights so they sum to 1.0 at each pixel
+        // Нормализуем веса так, чтобы их сумма в каждом пикселе равнялась 1.0
         val weightSum = Mat.zeros(h, w, CvType.CV_32FC1)
         for (wm in weightMaps) {
             Core.add(weightSum, wm, weightSum)
         }
-        // Avoid division by zero
+        // Избегаем деления на ноль
         val epsilon = Mat(h, w, CvType.CV_32FC1, Scalar(1e-6))
         Core.add(weightSum, epsilon, weightSum)
         epsilon.release()
@@ -253,7 +253,7 @@ object FocusStackCompositor {
         }
         weightSum.release()
 
-        // Blend only in seam zone
+        // Смешиваем только в зоне шва
         val pixel = DoubleArray(4)
         val blended = DoubleArray(4)
         val assignData = IntArray(1)
@@ -289,8 +289,8 @@ object FocusStackCompositor {
     }
 
     /**
-     * Detect artifact pixels where alignment failed (ghosting, double edges).
-     * Compares each pixel's source with the composite — large color difference = artifact.
+     * Обнаруживает пиксели-артефакты, где выравнивание не удалось (двоение, двойные края).
+     * Сравнивает источник каждого пикселя с композитом — большая разница в цвете = артефакт.
      */
     private fun detectArtifacts(
         srcMats: List<Mat>,
@@ -302,10 +302,10 @@ object FocusStackCompositor {
         val n = srcMats.size
         val artifactMask = Mat.zeros(h, w, CvType.CV_8UC1)
 
-        // For each pair of adjacent sources, check for ghosting
-        // at seam boundaries: if color difference between assigned source
-        // and neighboring source is too large, mark as artifact
-        val ARTIFACT_THRESHOLD = 60.0  // color difference threshold
+        // Для каждой пары соседних источников проверяем на двоение
+        // на границах швов: если разница в цвете между назначенным источником
+        // и соседним источником слишком велика — помечаем как артефакт
+        val ARTIFACT_THRESHOLD = 60.0  // порог разницы цвета
         val assignData = IntArray(1)
 
         for (y in 1 until h - 1) {
@@ -313,7 +313,7 @@ object FocusStackCompositor {
                 focusMap.assignment.get(y, x, assignData)
                 val myIdx = assignData[0].coerceIn(0, n - 1)
 
-                // Check if this pixel is near a boundary
+                // Проверяем, находится ли этот пиксель рядом с границей
                 var nearBoundary = false
                 for (dy in -2..2) {
                     for (dx in -2..2) {
@@ -331,7 +331,7 @@ object FocusStackCompositor {
 
                 if (!nearBoundary) continue
 
-                // Compare pixel across all sources — large variance = ghosting artifact
+                // Сравниваем пиксель по всем источникам — большой разброс = артефакт двоения
                 var maxDiff = 0.0
                 val refPixel = srcMats[myIdx].get(y, x)
 
@@ -352,7 +352,7 @@ object FocusStackCompositor {
             }
         }
 
-        // Dilate artifact mask slightly to cover surrounding pixels
+        // Немного расширяем маску артефактов, чтобы захватить соседние пиксели
         val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
         Imgproc.dilate(artifactMask, artifactMask, kernel)
         kernel.release()
@@ -361,7 +361,7 @@ object FocusStackCompositor {
     }
 
     /**
-     * Create debug visualization of seam boundaries (white lines on black).
+     * Создаёт отладочную визуализацию границ швов (белые линии на чёрном фоне).
      */
     private fun createSeamVisualization(seamMask: Mat, w: Int, h: Int): Bitmap {
         val vis = Mat()
@@ -373,25 +373,25 @@ object FocusStackCompositor {
     }
 
     /**
-     * Create debug color-coded visualization of focus map.
-     * Each source gets a distinct color.
+     * Создаёт отладочную цветовую визуализацию карты фокуса.
+     * Каждый источник получает отдельный цвет.
      */
     private fun createFocusMapVisualization(
         focusMap: FocusMapBuilder.FocusMap,
         w: Int, h: Int, n: Int
     ): Bitmap {
-        // Predefined colors for up to 10 sources
+        // Предопределённые цвета для не более чем 10 источников
         val colors = arrayOf(
-            doubleArrayOf(255.0, 0.0, 0.0, 200.0),     // red
-            doubleArrayOf(0.0, 255.0, 0.0, 200.0),     // green
-            doubleArrayOf(0.0, 0.0, 255.0, 200.0),     // blue
-            doubleArrayOf(255.0, 255.0, 0.0, 200.0),   // yellow
-            doubleArrayOf(255.0, 0.0, 255.0, 200.0),   // magenta
-            doubleArrayOf(0.0, 255.0, 255.0, 200.0),   // cyan
-            doubleArrayOf(255.0, 128.0, 0.0, 200.0),   // orange
-            doubleArrayOf(128.0, 0.0, 255.0, 200.0),   // purple
-            doubleArrayOf(0.0, 255.0, 128.0, 200.0),   // spring green
-            doubleArrayOf(255.0, 128.0, 128.0, 200.0)  // pink
+            doubleArrayOf(255.0, 0.0, 0.0, 200.0),     // красный
+            doubleArrayOf(0.0, 255.0, 0.0, 200.0),     // зелёный
+            doubleArrayOf(0.0, 0.0, 255.0, 200.0),     // синий
+            doubleArrayOf(255.0, 255.0, 0.0, 200.0),   // жёлтый
+            doubleArrayOf(255.0, 0.0, 255.0, 200.0),   // пурпурный
+            doubleArrayOf(0.0, 255.0, 255.0, 200.0),   // голубой
+            doubleArrayOf(255.0, 128.0, 0.0, 200.0),   // оранжевый
+            doubleArrayOf(128.0, 0.0, 255.0, 200.0),   // фиолетовый
+            doubleArrayOf(0.0, 255.0, 128.0, 200.0),   // весенне-зелёный
+            doubleArrayOf(255.0, 128.0, 128.0, 200.0)  // розовый
         )
 
         val vis = Mat(h, w, CvType.CV_8UC4)

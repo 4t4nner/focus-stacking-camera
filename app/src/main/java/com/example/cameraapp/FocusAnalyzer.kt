@@ -6,7 +6,6 @@ class FocusAnalyzer {
 
     /**
      * Анализирует детекции: рисует рамки и центры объектов.
-     * Анализ резкости временно отключен, все объекты относятся к зоне 1.
      */
     fun analyze(bitmap: Bitmap, detections: List<Detection>): Pair<Bitmap, List<FocusPoint>> {
         if (detections.isEmpty()) return Pair(bitmap, emptyList())
@@ -49,10 +48,8 @@ class FocusAnalyzer {
         val focusPoints = mutableListOf<FocusPoint>()
 
         for (det in detections) {
-            // Рисуем рамку
             canvas.drawRect(det.x1, det.y1, det.x2, det.y2, boxPaint)
 
-            // Рисуем подпись (пока всегда Zone 1)
             val label = "${det.className} Z1"
             val textW = textPaint.measureText(label)
             val textH = 40f

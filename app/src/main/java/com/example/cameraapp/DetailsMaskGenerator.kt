@@ -19,7 +19,7 @@ object DetailsMaskGenerator {
 
     private const val TAG = "DetailsMask"
 
-    /** Минимальная разница (0.0–1.0) между масками, чтобы считать их различными */
+    /** Минимальная разница 0.0–1.0 */
     const val DEFAULT_SIMILARITY_THRESHOLD = 0.05
 
     @Volatile
@@ -115,8 +115,8 @@ object DetailsMaskGenerator {
     }
 
     /**
-     * Вычисляет степень схожести двух масок (0.0 = полностью разные, 1.0 = идентичные).
-     * Использует отношение совпадающих пикселей к общему числу пикселей.
+     * степень схожести двух масок (0.0 = полностью разные, 1.0 = идентичные)
+     * отношение совпадающих пикселей к общему числу пикселей
      */
     fun computeSimilarity(maskPath1: String, maskPath2: String): Double {
         if (!ensureOpenCV()) return -1.0
@@ -132,7 +132,7 @@ object DetailsMaskGenerator {
             bmp1.recycle()
             bmp2.recycle()
 
-            // Конвертируем в grayscale
+            // -> grayscale
             val gray1 = Mat()
             val gray2 = Mat()
             Imgproc.cvtColor(mat1, gray1, Imgproc.COLOR_RGBA2GRAY)
@@ -145,7 +145,7 @@ object DetailsMaskGenerator {
                 Imgproc.resize(gray2, gray2, gray1.size())
             }
 
-            // Бинаризуем (на случай если PNG сохранился с антиалиасингом)
+            // Бинаризуем (если PNG сохранился с антиалиасингом)
             val bin1 = Mat()
             val bin2 = Mat()
             Imgproc.threshold(gray1, bin1, 127.0, 255.0, Imgproc.THRESH_BINARY)

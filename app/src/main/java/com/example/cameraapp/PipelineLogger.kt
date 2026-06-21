@@ -15,17 +15,16 @@ import java.util.Locale
 import android.app.ActivityManager
 import android.os.Debug
 
-/** Снимок использования памяти. Все значения в мегабайтах. */
+/** Снимок использования памяти. МБ */
 data class MemoryLog(
-    val tag: String,            // метка момента ("app_start", "after_processing", ...)
-    // Память процесса (наиболее показательна)
+    val tag: String,            // метка момента
+    // Память процесса
     val totalPssMb: Float,      // Proportional Set Size — суммарная память процесса
     val dalvikPssMb: Float,     // Java/Kotlin часть
     val nativePssMb: Float,     // native (OpenCV, ONNX, ML Kit)
     // JVM heap
     val javaHeapUsedMb: Float,
     val javaHeapMaxMb: Float,   // лимит heap
-    // Устройство в целом
     val deviceTotalMb: Float,
     val deviceAvailMb: Float,
     val deviceLowMemory: Boolean,
@@ -95,7 +94,7 @@ object PipelineLogger {
             memoryClassMb = am.memoryClass
         )
 
-        // Только копим в памяти — в файл всё запишется один раз в writeJson()
+        // Только копим в памяти — в файл всё запишется один раз в writeJson
         memorySnapshots.add(log)
 
         Log.d(
@@ -119,7 +118,7 @@ object PipelineLogger {
     @Synchronized
     fun logFrame(frame: FrameLog) {
         frames.add(frame)
-        val meters = frame.focusDistanceMeters?.let { "%.3f m".format(it) } ?: "∞/unknown"
+        val meters = frame.focusDistanceMeters?.let { "%.3f m".format(it) } ?: "unknown"
         Log.d(
             TAG,
             "FRAME #${frame.index} '${frame.label}': " +
@@ -134,7 +133,7 @@ object PipelineLogger {
         Log.d(TAG, "STAGE '$stage': ${durationMs}ms")
     }
 
-    /** Замеряет длительность участка пайплайна и логирует её. */
+    /** Замеряет длительность участка пайплайна и логирует */
     inline fun <T> measureStage(stage: String, block: () -> T): T {
         val start = System.currentTimeMillis()
         val result = block()

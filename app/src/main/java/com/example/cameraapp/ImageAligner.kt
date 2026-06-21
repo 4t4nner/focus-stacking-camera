@@ -13,8 +13,8 @@ import org.opencv.features2d.ORB
 import org.opencv.imgproc.Imgproc
 
 /**
- * Aligns multiple photos to a reference image using ORB feature matching + homography.
- * Handles camera/object motion between captures (~3 sec window).
+ * Выровняет несколько фотографий относительно эталонного изображения с использованием сопоставления признаков ORB и гомографии.
+ * Обрабатывает движение камеры или объекта между снимками (окно около 3 секунд).
  */
 object ImageAligner {
 
@@ -22,7 +22,7 @@ object ImageAligner {
     private const val MAX_FEATURES = 2000
     private const val GOOD_MATCH_RATIO = 0.75f
     private const val MIN_MATCHES = 10
-    // Max dimension for alignment computation (speed)
+    // Максимальный размер для вычисления выравнивания (ускорение)
     private const val ALIGN_MAX_DIM = 1600
 
     data class AlignedImage(
@@ -33,11 +33,11 @@ object ImageAligner {
     )
 
     /**
-     * Align all images to the reference (index 0).
-     * Returns list of aligned bitmaps in the same coordinate space as reference.
+     * Выровнять все изображения относительно эталонного (индекс 0).
+     * Возвращает список выровненных изображений в тех же координатах, что и эталон.
      *
-     * @param imagePaths paths to captured photos (first is reference)
-     * @return list of AlignedImage, or empty if failed
+     * @param imagePaths пути к сделанным фотографиям (первая - эталон)
+     * @return список AlignedImage, либо пустой если не удалось выполнить
      */
     fun alignImages(imagePaths: List<String>): List<AlignedImage> {
         if (!DetailsMaskGenerator.ensureOpenCV()) return emptyList()
@@ -47,7 +47,7 @@ object ImageAligner {
             val refBitmap = loadBitmap(imagePaths[0]) ?: return emptyList()
             val refMat = bitmapToGrayMat(refBitmap)
 
-            // Compute scale factor for faster feature detection
+            // Вычисляем коэффициент масштабирования для ускорения детекции признаков
             val scaleFactor = computeScaleFactor(refMat)
             val refSmall = if (scaleFactor < 1.0) {
                 val small = Mat()
@@ -62,11 +62,9 @@ object ImageAligner {
             orb.detectAndCompute(refSmall, Mat(), refKeypoints, refDescriptors)
 
             Log.d(TAG, "Reference: ${refKeypoints.toList().size} keypoints")
-
             val results = mutableListOf<AlignedImage>()
 
-            // Reference image itself — no transformation needed
-            results.add(AlignedImage(refBitmap, null, 1.0, 0))
+            // Эталонное изображение — трансформация не требуется
 
             for (i in 1 until imagePaths.size) {
                 val srcBitmap = loadBitmap(imagePaths[i])
@@ -82,7 +80,7 @@ object ImageAligner {
                     small
                 } else srcMat
 
-                // Detect features
+                // Детектируем признаки
                 val srcKeypoints = MatOfKeyPoint()
                 val srcDescriptors = Mat()
                 orb.detectAndCompute(srcSmall, Mat(), srcKeypoints, srcDescriptors)
@@ -91,7 +89,7 @@ object ImageAligner {
 
                 // Match features
                 val homography = findHomography(
-                    refDescriptors, refKeypoints,
+                // Сопоставление признаков
                     srcDescriptors, srcKeypoints,
                     scaleFactor
                 )
@@ -101,7 +99,7 @@ object ImageAligner {
                     val srcColor = Mat()
                     Utils.bitmapToMat(srcBitmap, srcColor)
                     srcBitmap.recycle()
-
+                    // Трансформируем исходное изображение в координатное пространство эталонного
                     val warped = Mat()
                     Imgproc.warpPerspective(
                         srcColor, warped, homography,
@@ -117,7 +115,7 @@ object ImageAligner {
                     Utils.matToBitmap(warped, warpedBitmap)
                     warped.release()
 
-                    // Estimate alignment quality from homography determinant
+                    // Оценка качества выравнивания по определителю гомографии
                     val quality = estimateAlignQuality(homography)
                     Log.d(TAG, "Image $i aligned, quality=${"%.3f".format(quality)}")
 
@@ -146,12 +144,12 @@ object ImageAligner {
     }
 
     /**
-     * Align a single mask to the reference using a pre-computed homography.
+     * Выровнять одну маску с эталоном, используя заранее вычисленную гомографию.
      */
     fun warpMask(maskPath: String, homography: Mat?, refWidth: Int, refHeight: Int): Bitmap? {
         if (!DetailsMaskGenerator.ensureOpenCV()) return null
         if (homography == null) {
-            // Reference mask — no warping needed
+            // Эталонная маска — трансформация не требуется
             return BitmapFactory.decodeFile(maskPath)
         }
 
@@ -165,7 +163,7 @@ object ImageAligner {
             Imgproc.warpPerspective(
                 maskMat, warped, homography,
                 Size(refWidth.toDouble(), refHeight.toDouble()),
-                Imgproc.INTER_NEAREST  // nearest for binary mask
+                Imgproc.INTER_NEAREST  // метод INTER_NEAREST для бинарной маски
             )
             maskMat.release()
 
@@ -191,7 +189,7 @@ object ImageAligner {
         val knnMatches = mutableListOf<MatOfDMatch>()
         matcher.knnMatch(srcDesc, refDesc, knnMatches, 2)
 
-        // Lowe's ratio test
+        // Критерий Лоу (соотношение ближайших соседей)
         val goodMatches = knnMatches.filter { m ->
             val matchList = m.toList()
             matchList.size == 2 && matchList[0].distance < GOOD_MATCH_RATIO * matchList[1].distance
@@ -232,13 +230,10 @@ object ImageAligner {
     }
 
     private fun estimateAlignQuality(H: Mat): Double {
-        // Quality from homography: ideal H is close to identity
-        // Check determinant (should be ~1.0) and off-diagonal perspective terms
         val det = Core.determinant(H)
         // det close to 1.0 = good, far from 1.0 = bad
         val detScore = 1.0 / (1.0 + kotlin.math.abs(det - 1.0) * 5.0)
 
-        // Check perspective terms H[2,0] and H[2,1] — should be near 0
         val h20 = H.get(2, 0)?.get(0) ?: 0.0
         val h21 = H.get(2, 1)?.get(0) ?: 0.0
         val perspScore = 1.0 / (1.0 + (kotlin.math.abs(h20) + kotlin.math.abs(h21)) * 1000.0)
@@ -280,7 +275,7 @@ object ImageAligner {
     }
 
     /**
-     * Release homography matrices from AlignedImage list.
+     * Удалить матрицы гомографии из списка AlignedImage.
      */
     fun releaseAlignedImages(images: List<AlignedImage>) {
         for (img in images) {

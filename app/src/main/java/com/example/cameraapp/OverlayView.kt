@@ -65,13 +65,10 @@ class OverlayView @JvmOverloads constructor(
         postInvalidate()
     }
 
-    // ===== РУЧНОЙ РЕЖИМ: управление =====
-
     fun setManualMode(enabled: Boolean) {
         manualMode = enabled
         if (!enabled) manualPoints.clear()
-        // В ручном режиме detections не приходят (детектор заглушён),
-        // но source-размеры нужны для маппинга — задаём их извне через setAnalysisSize().
+        // В ручном режиме detections не приходят
         postInvalidate()
     }
 
@@ -89,7 +86,7 @@ class OverlayView @JvmOverloads constructor(
         postInvalidate()
     }
 
-    /** Отметить последнюю/конкретную точку как настроенную (по индексу). */
+    /** Отметить последнюю/конкретную точку как настроенную (индекс) */
     fun setManualPointConfigured(index: Int, configured: Boolean) {
         if (index in manualPoints.indices) {
             manualPoints[index].configured = configured
@@ -110,8 +107,6 @@ class OverlayView @JvmOverloads constructor(
         manualPoints.clear()
         postInvalidate()
     }
-
-    // ===== Геометрия маппинга view <-> кадр анализа =====
 
     private fun currentScale(): Float {
         val viewW = width.toFloat()
@@ -189,7 +184,7 @@ class OverlayView @JvmOverloads constructor(
             return
         }
 
-        // ===== АВТО-РЕЖИМ: детекции (как раньше) =====
+        // ===== АВТО-РЕЖИМ =====
         if (detections.isEmpty()) return
 
         val pointPaint = if (capturingMode) pointPaintRed else pointPaintGreen

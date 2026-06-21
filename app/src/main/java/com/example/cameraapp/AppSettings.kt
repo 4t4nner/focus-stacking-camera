@@ -3,10 +3,6 @@ package com.example.cameraapp
 import android.content.Context
 import android.content.SharedPreferences
 
-/**
- * Persistent settings stored in SharedPreferences.
- * Editable from Settings dialog in the app.
- */
 object AppSettings {
 
     private const val PREFS_NAME = "cameraapp_settings"

@@ -11,7 +11,6 @@ import java.net.Socket
 import java.net.URL
 
 /**
- * Handles remote focus stacking via async job queue:
  *   1. POST /api/focus-stack → получаем job_id (мгновенно)
  *   2. GET /api/status/<job_id> → polling пока status != "done"
  *   3. GET /api/result/<job_id> → скачиваем JPEG
@@ -40,7 +39,7 @@ object RemoteProcessor {
     }
 
     /**
-     * Check if remote server is reachable.
+     * доступен ли удалённый сервер
      */
     fun isServerAvailable(config: RemoteConfig): Boolean {
         if (!config.enabled) return false
@@ -73,13 +72,13 @@ object RemoteProcessor {
     }
 
     /**
-     * Send images to remote server for focus stacking (async job queue).
+     * Отправляет изображения на удалённый сервер для фокус-стекинга (асинхронная очередь задач).
      *
-     * @param config server configuration
-     * @param imagePaths list of image file paths
-     * @param focusPoints list of (cx, cy) focus points
-     * @param progressCallback optional callback for status updates
-     * @return composite Bitmap or null if failed
+     * @param config конфигурация сервера
+     * @param imagePaths список путей к файлам изображений
+     * @param focusPoints список точек фокуса (cx, cy)
+     * @param progressCallback необязательный callback для обновления статуса
+     * @return результирующий Bitmap или null при ошибке
      */
     fun processRemotely(
         config: RemoteConfig,
@@ -103,7 +102,7 @@ object RemoteProcessor {
             Log.d(TAG, "Job submitted: $jobId")
             progressCallback?.onProgress("Job submitted: $jobId")
 
-            // ========== STEP 2: Poll for completion ==========
+            // ========== ШАГ 2: Ожидание завершения ==========
             val success = pollUntilDone(config, jobId, progressCallback)
 
             if (!success) {
@@ -111,7 +110,7 @@ object RemoteProcessor {
                 return null
             }
 
-            // ========== STEP 3: Download result ==========
+            // ========== ШАГ 3: Загрузка результата ==========
             progressCallback?.onProgress("Downloading result...")
             val bitmap = downloadResult(config, jobId)
 
@@ -130,7 +129,7 @@ object RemoteProcessor {
         }
     }
 
-    // ======================== STEP 1: SUBMIT ========================
+    // ======================== ШАГ 1: ОТПРАВКА ========================
 
     private fun submitJob(
         config: RemoteConfig,
@@ -176,7 +175,6 @@ object RemoteProcessor {
                     Log.d(TAG, "  Uploaded image ${i + 1}/${imagePaths.size}: ${file.name}")
                 }
 
-                // Focus points
                 // Focus points — отправляем НОРМИРОВАННЫЕ координаты [0..1]
                 val aw = if (analysisWidth > 0) analysisWidth.toFloat() else 1f
                 val ah = if (analysisHeight > 0) analysisHeight.toFloat() else 1f
@@ -222,7 +220,7 @@ object RemoteProcessor {
         }
     }
 
-    // ======================== STEP 2: POLL ========================
+    // ======================== ШАГ 2: ОПРОС ========================
 
     private fun pollUntilDone(
         config: RemoteConfig,
@@ -306,7 +304,7 @@ object RemoteProcessor {
         return false
     }
 
-    // ======================== STEP 3: DOWNLOAD ========================
+    // ======================== ШАГ 3: ЗАГРУЗКА ========================
 
     private fun downloadResult(config: RemoteConfig, jobId: String): Bitmap? {
         val url = URL("http://${config.serverHost}:${config.serverPort}/api/result/$jobId")

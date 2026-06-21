@@ -113,7 +113,7 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var lastAnalysisWidth: Int = 0
     @Volatile private var lastAnalysisHeight: Int = 0
 
-    // Object detection results (used for capture)
+    // Результаты детекции объектов (используются при захвате)
     @Volatile
     private var detectedObjects: List<DetectedObject> = emptyList()
 
@@ -443,6 +443,11 @@ class MainActivity : AppCompatActivity() {
                         }
                         lastAfState = result.get(CaptureResult.CONTROL_AF_STATE)
                         lastAeState = result.get(CaptureResult.CONTROL_AE_STATE)
+
+                        result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let {
+                            lastFocusDistance = it
+                            Log.d(TAG, "preview LENS_FOCUS_DISTANCE=$it afState=${result.get(CaptureResult.CONTROL_AF_STATE)}")
+                        }
                     }
                 }
             )
@@ -555,7 +560,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
-            // FPS counter
+            // Счётчик FPS
             frameCount++
             val now = System.currentTimeMillis()
             if (now - lastFpsTime >= 1000) {
@@ -847,7 +852,7 @@ class MainActivity : AppCompatActivity() {
             val tempDir = File(cacheDir, "local_proc_${System.currentTimeMillis()}")
             tempDir.mkdirs()
 
-            // Step 1: Generate detail masks
+            // Шаг 1: Генерация масок детализации
             val maskPaths = mutableListOf<String>()
             PipelineLogger.measureStage("generate_masks") {
                 for ((i, imgPath) in imagePaths.withIndex()) {
@@ -858,7 +863,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Step 2: Filter duplicates
+            // Шаг 2: Фильтрация дубликатов
             runOnUiThread { updateProgress("Filtering duplicate masks...") }
             val uniqueIndices = PipelineLogger.measureStage("filter_duplicates") {
                 filterDuplicateMasks(maskPaths)
@@ -881,7 +886,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Step 3: Align images
+            // Шаг 3: Выравнивание изображений
             runOnUiThread { updateProgress("Aligning ${uImagePaths.size} images...") }
             val alignedImages = PipelineLogger.measureStage("align_images") {
                 ImageAligner.alignImages(uImagePaths)
@@ -891,7 +896,7 @@ class MainActivity : AppCompatActivity() {
                 return BitmapFactory.decodeFile(imagePaths[0])
             }
 
-            // Step 4: Warp masks
+            // Шаг 4: Трансформация масок
             runOnUiThread { updateProgress("Warping masks...") }
             val refW = alignedImages[0].bitmap.width
             val refH = alignedImages[0].bitmap.height
@@ -907,7 +912,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-            // Step 5: Focus map
+            // Шаг 5: Карта фокуса
             runOnUiThread { updateProgress("Building focus map...") }
             val focusMap = PipelineLogger.measureStage("build_focus_map") {
                 FocusMapBuilder.buildFocusMap(alignedMasks, uFocusPoints)
@@ -918,7 +923,7 @@ class MainActivity : AppCompatActivity() {
                 return BitmapFactory.decodeFile(imagePaths[0])
             }
 
-            // Step 6: Composite
+            // Шаг 6: Композитинг
             runOnUiThread { updateProgress("Compositing...") }
             val alignedBitmaps = alignedImages.map { it.bitmap }
             val compositeResult = PipelineLogger.measureStage("composite") {

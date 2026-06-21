@@ -25,7 +25,7 @@ add_file() {
     rel_path=$(realpath --relative-to="$PROJECT_ROOT" "$file_path")
 
     {
-        echo "# $rel_path"
+        echo "$rel_path:"
         echo ''
         echo '```'
         cat "$file_path"

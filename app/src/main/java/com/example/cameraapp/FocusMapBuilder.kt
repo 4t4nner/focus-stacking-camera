@@ -56,7 +56,6 @@ object FocusMapBuilder {
 
             Log.d(TAG, "Building focus map: ${w}x${h}, $n sources")
 
-            // Convert masks to grayscale float Mats
             val maskMats = alignedMasks.map { bmp ->
                 val rgba = Mat()
                 Utils.bitmapToMat(bmp, rgba)
@@ -66,7 +65,6 @@ object FocusMapBuilder {
                 val floatMat = Mat()
                 gray.convertTo(floatMat, CvType.CV_32F, 1.0 / 255.0)
                 gray.release()
-                // Smooth to avoid pixel-level noise in assignment
                 if (blurRadius > 1) {
                     val ksize = if (blurRadius % 2 == 0) blurRadius + 1 else blurRadius
                     Imgproc.GaussianBlur(floatMat, floatMat, Size(ksize.toDouble(), ksize.toDouble()), 0.0)
@@ -79,21 +77,16 @@ object FocusMapBuilder {
             val maxSharpness = Mat(h, w, CvType.CV_32FC1, Scalar(0.0))
 
             for (i in 0 until n) {
-                // Compare current mask with running max
                 val mask = maskMats[i]
-                // Where this mask is sharper than current max
                 val comparison = Mat()
                 Core.compare(mask, maxSharpness, comparison, Core.CMP_GT)
 
-                // Update assignment where this source wins
                 assignment.setTo(Scalar(i.toDouble()), comparison)
-                // Update max sharpness
                 mask.copyTo(maxSharpness, comparison)
 
                 comparison.release()
             }
 
-            // For pixels where ALL masks have 0 sharpness → assign to nearest focus point
             val zeroMask = Mat()
             Core.compare(maxSharpness, Scalar(0.001), zeroMask, Core.CMP_LT)
 
@@ -109,7 +102,6 @@ object FocusMapBuilder {
             maxSharpness.release()
             maskMats.forEach { it.release() }
 
-            // Smooth assignment boundaries with mode filter (median-like)
             smoothAssignment(assignment, 5)
 
             Log.d(TAG, "Focus map built successfully")
@@ -121,31 +113,22 @@ object FocusMapBuilder {
         }
     }
 
-    /**
-     * For unfocused pixels (zeroMask), assign to the source whose focus point is nearest.
-     */
     private fun assignByNearestFocusPoint(
         assignment: Mat,
         zeroMask: Mat,
         focusPoints: List<Pair<Float, Float>>,
         w: Int, h: Int
     ) {
-        // Create distance maps for each focus point, pick the nearest
-        // For efficiency, use Voronoi-like approach: create seed image and distanceTransform
-
         val seeds = Mat.zeros(h, w, CvType.CV_8UC1)
 
-        // Draw small circles at each focus point
         for ((i, fp) in focusPoints.withIndex()) {
             val cx = fp.first.toInt().coerceIn(0, w - 1)
             val cy = fp.second.toInt().coerceIn(0, h - 1)
             Imgproc.circle(seeds, Point(cx.toDouble(), cy.toDouble()), 3, Scalar((i + 1).toDouble()), -1)
         }
 
-        // Dilate seeds iteratively to fill (simple Voronoi)
-        // For large images this is fast enough with a few hundred iterations
         val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(7.0, 7.0))
-        val maxIter = (maxOf(w, h) / 3) // enough to fill entire image
+        val maxIter = (maxOf(w, h) / 3)
         var prev = seeds.clone()
 
         for (iter in 0 until maxIter) {
@@ -185,9 +168,6 @@ object FocusMapBuilder {
         prev.release()
     }
 
-    /**
-     * Smooth assignment boundaries using local mode filter to reduce jagged edges.
-     */
     private fun smoothAssignment(assignment: Mat, kernelSize: Int) {
         if (kernelSize <= 1) return
 

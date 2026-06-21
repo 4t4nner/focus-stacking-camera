@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""
-Focus Stacking Remote Server — Async Job Queue with YOLO refinement.
-"""
 from pipeline_logger import ServerPipelineLogger
 import os
 import io
@@ -23,16 +20,12 @@ from flask import Flask, request, jsonify, send_file
 
 app = Flask(__name__)
 
-# ======================== CONFIG ========================
-
 DEBUG_OUTPUT_DIR = os.environ.get("DEBUG_OUTPUT_DIR", "./debug_output")
 
-# Job storage
 jobs = {}
 jobs_lock = threading.Lock()
 JOB_TTL_SECONDS = 600
 
-# YOLO availability flag (set at startup)
 _yolo_available = False
 
 
@@ -156,14 +149,14 @@ def save_zone_masks_and_mapped(
         (128, 255, 0),
     ]
 
-    # --- 1) ч/б маски зон ---
+    # ч/б маски зон
     for i in range(n_sources):
         zone_mask = (focus_map == i).astype(np.uint8) * 255
         path = os.path.join(session_dir, f"zone_mask_{i:03d}.png")
         cv2.imwrite(path, zone_mask)
         app.logger.info(f"  [DEBUG] Saved zone mask {i}: {path}")
 
-    # --- 2) цветной оверлей зон поверх composite ---
+    # цветной оверлей зон поверх composite
     mapped = composite.copy()
     zone_overlay = np.zeros_like(composite)
     for i in range(n_sources):
@@ -198,6 +191,7 @@ def save_zone_masks_and_mapped(
     path = os.path.join(session_dir, "composite_final_mapped.jpg")
     cv2.imwrite(path, mapped, [cv2.IMWRITE_JPEG_QUALITY, 95])
     app.logger.info(f"  [DEBUG] Saved mapped composite: {path}")
+
 # ======================== PIPELINE WORKER ========================
 
 def process_job(job_id: str, image_data_list: list, focus_points: list,
@@ -254,7 +248,7 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
                 image_paths.append(input_path)
                 app.logger.info(f"[Job {job_id}]   Image {i}: {filenames[i]} saved")
 
-        # Step 1: Detail masks (DoG)
+        # Step 1: DoG
         with jobs_lock:
             jobs[job_id]["step"] = "generating_masks"
 
@@ -273,7 +267,7 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
             plog.set_meta(image_size=f"{mw}x{mh}")
         plog.log_memory("after_masks")
 
-        # Step 1b: Filter duplicates
+        # Step 1b: Фильтрует похожие
         with plog.measure_stage("filter_duplicates"):
             unique_indices = filter_duplicate_masks(masks, similarity_threshold=0.05)
         app.logger.info(f"[Job {job_id}]   Unique masks: {unique_indices} / {len(masks)}")
@@ -295,6 +289,7 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
 
         u_image_paths = [image_paths[i] for i in unique_indices]
         u_masks = [masks[i] for i in unique_indices]
+
         # масштаб нормированных координат: точки приходят либо как {nx,ny} в [0..1],
         # либо как legacy {cx,cy} в координатах кадра анализа (НЕ полноразмерных!).
         def _resolve_point(fp, w, h):
@@ -314,26 +309,14 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
             mh_i, mw_i = masks[i].shape[:2]
             fp = focus_points[i] if i < len(focus_points) else None
             u_focus_points.append(_resolve_point(fp, mw_i, mh_i))
-        # масштаб нормированных координат: точки приходят либо как {nx,ny} в [0..1],
-        # либо как legacy {cx,cy} в координатах кадра анализа (НЕ полноразмерных!).
-        def _resolve_point(fp, w, h):
-            if fp is None:
-                return {"cx": w // 2, "cy": h // 2}
-            if "nx" in fp and "ny" in fp:
-                return {
-                    "cx": int(round(float(fp["nx"]) * (w - 1))),
-                    "cy": int(round(float(fp["ny"]) * (h - 1))),
-                }
-            # legacy: считаем, что cx/cy уже в пикселях этого изображения
-            return {"cx": int(fp.get("cx", w // 2)),
-                    "cy": int(fp.get("cy", h // 2))}
 
         u_focus_points = []
         for i in unique_indices:
             mh_i, mw_i = masks[i].shape[:2]
             fp = focus_points[i] if i < len(focus_points) else None
             u_focus_points.append(_resolve_point(fp, mw_i, mh_i))
-        # Step 2: Align
+
+        # 2: выравнивание
         with jobs_lock:
             jobs[job_id]["step"] = "aligning"
 
@@ -351,7 +334,7 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
                 save_debug_image(session_dir, f"aligned_mask_{i:03d}.png", amask,
                                  is_mask=True)
 
-        # Step 3: Focus map
+        # 3: Focus map
         with jobs_lock:
             jobs[job_id]["step"] = "building_focus_map"
 
@@ -365,7 +348,7 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
             session_dir, focus_map, len(aligned_images), fp_list
         )
 
-        # Step 3b: YOLO refinement — keep objects intact
+        # 3b: YOLO уточнение
         with jobs_lock:
             jobs[job_id]["step"] = "yolo_refinement"
 
@@ -377,7 +360,7 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
             )
         plog.log_memory("after_yolo")
 
-        # Step 4: Composite
+        # 4: Composite
         with jobs_lock:
             jobs[job_id]["step"] = "compositing"
 
@@ -387,14 +370,14 @@ def process_job(job_id: str, image_data_list: list, focus_points: list,
         app.logger.info(f"[Job {job_id}]   Composite: shape={composite.shape}")
         save_debug_image(session_dir, "composite_raw.jpg", composite)
 
-        # Step 5: Blend seams
+        # 5: Blend
         with jobs_lock:
             jobs[job_id]["step"] = "blending_seams"
 
         with plog.measure_stage("blend_seams"):
             composite = blend_seams(composite, aligned_images, focus_map)
 
-        # Save results
+        # Save
         with plog.measure_stage("save_result"):
             result_path = os.path.join(session_dir, "composite_final.jpg")
             cv2.imwrite(result_path, composite, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -476,7 +459,7 @@ def _apply_yolo_refinement(
         traceback.print_exc()
         return focus_map
 
-# ======================== API ENDPOINTS ========================
+# ======================== API ========================
 
 @app.route("/ping", methods=["GET"])
 def ping():
@@ -634,9 +617,6 @@ def filter_duplicate_masks(
     Дубликатом считается кадр, чья DoG-маска почти совпадает с уже принятой.
     Метрика: доля расходящихся пикселей среди ОБЪЕДИНЕНИЯ активных пикселей
     (а не среди всего кадра — иначе разреженные маски всегда «похожи»).
-
-    similarity_threshold = 0.05 означает: если различается <=5% активной
-    площади — это дубликат.
     """
     if not masks:
         return []
@@ -675,7 +655,7 @@ def filter_duplicate_masks(
     return unique
 
 
-# ======================== ALIGNMENT ========================
+# ======================== выравнивание ========================
 
 def align_images(
         image_paths: list, masks: list,
@@ -758,7 +738,7 @@ def build_focus_map(
     h, w = aligned_masks[0].shape[:2]
     n = len(aligned_masks)
 
-    # --- базовый argmax по сглаженным маскам ---
+    # базовый argmax по сглаженным маскам
     float_masks = []
     for mask in aligned_masks:
         fm = mask.astype(np.float32) / 255.0
@@ -771,7 +751,7 @@ def build_focus_map(
     max_vals = np.max(stacked, axis=0)
     unfocused = max_vals < 0.001
 
-    # --- заполнение нерезких областей по seed-точкам (как было) ---
+    # заполнение нерезких областей по seed-точкам
     if np.any(unfocused) and focus_points:
         seeds = np.zeros((h, w), dtype=np.int32)
         for i, fp in enumerate(focus_points):
@@ -842,7 +822,7 @@ def _extract_contour_at_point(
 
     lbl = labels[cy, cx]
     if lbl == 0:
-        # точка попала в «дырку»/фон — ищем ближайший компонент в радиусе
+        # точка попала в "дырку"/фон — ищем ближайший компонент в радиусе
         r = max(5, min(h, w) // 50)
         y0, y1 = max(0, cy - r), min(h, cy + r + 1)
         x0, x1 = max(0, cx - r), min(w, cx + r + 1)
@@ -876,7 +856,7 @@ def composite_images(
     return composite
 
 
-# ======================== SEAM BLEND (FIXED) ========================
+# ======================== BLEND ========================
 
 def blend_seams(
         composite: np.ndarray,
@@ -887,7 +867,6 @@ def blend_seams(
     h, w = focus_map.shape
     n = len(aligned_images)
 
-    # Find seam pixels
     padded = np.pad(focus_map, 1, mode='edge')
     seam_mask = np.zeros((h, w), dtype=np.uint8)
     for dy in range(-1, 2):
@@ -897,7 +876,7 @@ def blend_seams(
             shifted = padded[1 + dy:h + 1 + dy, 1 + dx:w + 1 + dx]
             seam_mask |= (focus_map != shifted).astype(np.uint8)
 
-    # Dilate seam region
+    # Dilate
     if blend_radius > 1:
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (blend_radius * 2 + 1, blend_radius * 2 + 1)
@@ -908,7 +887,7 @@ def blend_seams(
     if len(seam_pixels[0]) == 0:
         return composite
 
-    # Build distance-based weight maps
+    # по дистанции
     weight_maps = []
     for i in range(n):
         source_mask = (focus_map == i).astype(np.uint8) * 255
@@ -919,7 +898,6 @@ def blend_seams(
 
     weight_sum = np.sum(weight_maps, axis=0) + 1e-6
 
-    # Vectorized seam blending (much faster than per-pixel loop)
     result = composite.copy().astype(np.float64)
     sy, sx = seam_pixels
 
@@ -933,7 +911,6 @@ def blend_seams(
     return result.astype(np.uint8)
 
 
-# ======================== MAIN ========================
 
 if __name__ == "__main__":
     import argparse
@@ -950,7 +927,7 @@ if __name__ == "__main__":
     DEBUG_OUTPUT_DIR = args.output_dir
     os.makedirs(DEBUG_OUTPUT_DIR, exist_ok=True)
 
-    # Check YOLO availability
+    # YOLO
     if not args.no_yolo:
         try:
             from yolo_segmenter import is_available, _ensure_model

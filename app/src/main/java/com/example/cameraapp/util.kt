@@ -22,15 +22,6 @@ fun appSettingOpen(context: Context){
         .setNegativeButton("Отмена", null)
         .setCancelable(false)
         .show()
-//    Toast.makeText(
-//        context,
-//        "Go to Setting and Enable All Permission",
-//        Toast.LENGTH_LONG
-//    ).show()
-//
-//    val settingIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-//    settingIntent.data = Uri.parse("package:${context.packageName}")
-//    context.startActivity(settingIntent)
 }
 
 fun warningPermissionDialog(context: Context,listener : DialogInterface.OnClickListener){
