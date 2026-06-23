@@ -5,3 +5,5 @@ Pillow
 gunicorn
 scipy
 ultralytics
+PyMaxflow
+gco-wrapper
